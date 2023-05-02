@@ -1,0 +1,16 @@
+FROM golang:1.20-buster as builder
+
+ARG VERSION
+WORKDIR /src
+COPY . .
+
+RUN go build -v -o /usr/bin/telegram-driver -ldflags "-s -v -w -X 'main.version=${VERSION}'" .
+
+FROM debian:buster-slim
+RUN set -x && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
+    ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/bin/telegram-driver /usr/bin/telegram-driver
+
+RUN chmod +x /usr/bin/telegram-driver

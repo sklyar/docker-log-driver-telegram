@@ -1,0 +1,33 @@
+{
+  "description": "Telegram Logging Driver",
+  "entrypoint": [
+    "/usr/bin/telegram-driver"
+  ],
+  "network": {
+    "type": "host"
+  },
+  "interface": {
+    "types": [
+      "docker.logdriver/1.0"
+    ],
+    "socket": "telegram.sock"
+  },
+  "env": [
+    {
+      "name": "ENV",
+      "description": "Set environment to run plugin in. Valid values are: production, development.",
+      "value": "development",
+      "settable": [
+        "value"
+      ]
+    },
+    {
+      "name": "LOG_LEVEL",
+      "description": "Set log level to output for plugin logs. Valid values are: debug, info, warn, error, fatal, panic.",
+      "value": "debug",
+      "settable": [
+        "value"
+      ]
+    }
+  ]
+}
