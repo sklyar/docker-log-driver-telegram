@@ -112,7 +112,6 @@ services:
     logging:
       driver: telegram
       options:
-        url: "https://api.telegram.org"
         token: "<bot_token>"
         chat_id: "<chat_id>"
 ```
