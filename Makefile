@@ -45,16 +45,17 @@ docker-driver-push: docker-driver
 docker-driver-enable:
 	$(call print-target)
 	$(V)docker plugin enable $(PLUGIN_NAME):$(PLUGIN_TAG)
+	$(V)docker plugin enable $(PLUGIN_NAME):latest
 
 .PHONY: docker-driver-clean
 docker-driver-clean:
 	$(call print-target)
 
-	$(V)docker plugin disable $(PLUGIN_NAME):$(PLUGIN_TAG) || true
-	$(V)docker plugin rm $(PLUGIN_NAME):$(PLUGIN_TAG) || true
+	$(V)docker plugin disable -f $(PLUGIN_NAME):$(PLUGIN_TAG) || true
+	$(V)docker plugin rm -f $(PLUGIN_NAME):$(PLUGIN_TAG) || true
 
-	$(V)docker plugin disable $(PLUGIN_NAME):latest || true
-	$(V)docker plugin rm $(PLUGIN_NAME):latest || true
+	$(V)docker plugin disable -f $(PLUGIN_NAME):latest || true
+	$(V)docker plugin rm -f $(PLUGIN_NAME):latest || true
 
 	$(V)rm -rf rootfs
 	$(V)rm -f config.json
