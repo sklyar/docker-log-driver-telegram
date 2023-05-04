@@ -14,6 +14,10 @@ import (
 
 const driverName = "telegram"
 
+// defaultBufSize provides a reasonable default for loggers that do
+// not have an external limit to impose on log line size.
+const defaultBufSize = 16 * 1024
+
 var (
 	errUnknownTag   = errors.New("unknown tag")
 	errLoggerClosed = errors.New("logger closed")
@@ -29,12 +33,14 @@ type client interface {
 type TelegramLogger struct {
 	client client
 
-	logger    *zap.Logger
-	formatter *messageFormatter
-	cfg       *loggerConfig
+	partialLogsBuffer *partialLogBuffer
+	formatter         *messageFormatter
+	cfg               *loggerConfig
 
 	closed bool
 	mu     sync.RWMutex
+
+	logger *zap.Logger
 }
 
 var _ = (logger.Logger)(&TelegramLogger{})
@@ -63,12 +69,13 @@ func NewTelegramLogger(logger *zap.Logger, containerDetails *ContainerDetails) (
 	}
 
 	return &TelegramLogger{
-		client:    client,
-		logger:    logger,
-		formatter: formatter,
-		cfg:       cfg,
-		closed:    false,
-		mu:        sync.RWMutex{},
+		client:            client,
+		partialLogsBuffer: newPartialLogBuffer(),
+		formatter:         formatter,
+		cfg:               cfg,
+		closed:            false,
+		mu:                sync.RWMutex{},
+		logger:            logger,
 	}, nil
 }
 
@@ -78,19 +85,28 @@ func (l *TelegramLogger) Name() string {
 }
 
 // Log implements the logger.Logger interface.
-func (l *TelegramLogger) Log(msg *logger.Message) error {
+func (l *TelegramLogger) Log(log *logger.Message) error {
 	l.mu.RLock()
 	if l.closed {
 		return errLoggerClosed
 	}
 	defer l.mu.RUnlock()
 
-	if l.cfg.FilterRegex != nil && !l.cfg.FilterRegex.Match(msg.Line) {
+	if log.PLogMetaData != nil {
+		assembledLog, last := l.partialLogsBuffer.Append(log)
+		if !last {
+			return nil
+		}
+
+		*log = *assembledLog
+	}
+
+	if l.cfg.FilterRegex != nil && !l.cfg.FilterRegex.Match(log.Line) {
 		l.logger.Debug("message is filtered out by regex", zap.String("regex", l.cfg.FilterRegex.String()))
 		return nil
 	}
 
-	text := l.formatter.Format(msg)
+	text := l.formatter.Format(log)
 	return l.client.SendMessage(text)
 }
 
@@ -177,4 +193,44 @@ func (f *messageFormatter) tagFunc(msg *logger.Message) fasttemplate.TagFunc {
 
 		return 0, fmt.Errorf("%w: %s", errUnknownTag, tag)
 	}
+}
+
+type partialLogBuffer struct {
+	logs map[string]*logger.Message
+	mu   sync.Mutex
+}
+
+func newPartialLogBuffer() *partialLogBuffer {
+	return &partialLogBuffer{
+		logs: map[string]*logger.Message{},
+	}
+}
+
+func (b *partialLogBuffer) Append(log *logger.Message) (*logger.Message, bool) {
+	if log.PLogMetaData == nil {
+		panic("log must be partial")
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	plog, exists := b.logs[log.PLogMetaData.ID]
+	if !exists {
+		plog = new(logger.Message)
+		*plog = *log
+
+		b.logs[plog.PLogMetaData.ID] = plog
+
+		plog.Line = make([]byte, 0, defaultBufSize)
+		plog.PLogMetaData = nil
+	}
+
+	plog.Line = append(plog.Line, log.Line...)
+
+	if log.PLogMetaData.Last {
+		delete(b.logs, log.PLogMetaData.ID)
+		return plog, true
+	}
+
+	return nil, false
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/containerd/fifo"
+	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/api/types/plugins/logdriver"
 	"github.com/docker/docker/daemon/logger"
 	"github.com/docker/docker/daemon/logger/jsonfilelog"
@@ -153,10 +154,20 @@ func (d *Driver) defaultProcessLogs(stream *logStream, processedNotifier chan<- 
 
 		entry := logs.Log()
 
+		var partialLog *backend.PartialLogMetaData
+		if m := entry.GetPartialLogMetadata(); m != nil {
+			partialLog = &backend.PartialLogMetaData{
+				Last:    m.GetLast(),
+				ID:      m.GetId(),
+				Ordinal: int(m.GetOrdinal()),
+			}
+		}
+
 		log := &logger.Message{
-			Line:      entry.Line,
-			Source:    entry.Source,
-			Timestamp: time.Unix(0, entry.TimeNano),
+			Line:         entry.GetLine(),
+			Source:       entry.GetSource(),
+			Timestamp:    time.Unix(0, entry.GetTimeNano()),
+			PLogMetaData: partialLog,
 		}
 
 		stream.logger.Debug(

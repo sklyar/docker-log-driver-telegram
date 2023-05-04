@@ -4,10 +4,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/daemon/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"sync"
 )
 
 var defaultContainerDetails = &ContainerDetails{
@@ -29,6 +32,8 @@ func (c *mockClient) SendMessage(message string) error {
 }
 
 func TestTelegramLoggerLog(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		message string
@@ -79,6 +84,46 @@ func TestTelegramLoggerLog(t *testing.T) {
 	}
 }
 
+func TestTelegramLoggerLog_PartialLog(t *testing.T) {
+	t.Parallel()
+
+	log1 := &logger.Message{
+		Line:         []byte("1"),
+		PLogMetaData: &backend.PartialLogMetaData{ID: "group_id"},
+	}
+	log2 := &logger.Message{
+		Line:         []byte("2"),
+		PLogMetaData: &backend.PartialLogMetaData{ID: "group_id"},
+	}
+	log3 := &logger.Message{
+		Line:         []byte("3"),
+		PLogMetaData: &backend.PartialLogMetaData{ID: "group_id", Last: true},
+	}
+	assembledLog := &logger.Message{
+		Line:         []byte("123"),
+		PLogMetaData: &backend.PartialLogMetaData{ID: "group_id"},
+	}
+
+	formatter, err := newMessageFormatter(defaultContainerDetails, nil, "{log}")
+	assert.NoError(t, err)
+
+	client := &mockClient{}
+	client.On("SendMessage", string(assembledLog.Line)).Return(nil)
+
+	telegramLogger := &TelegramLogger{
+		client:            client,
+		partialLogsBuffer: newPartialLogBuffer(),
+		formatter:         formatter,
+		cfg:               &loggerConfig{},
+		mu:                sync.RWMutex{},
+		logger:            zap.NewNop(),
+	}
+
+	assert.NoError(t, telegramLogger.Log(log1))
+	assert.NoError(t, telegramLogger.Log(log2))
+	assert.NoError(t, telegramLogger.Log(log3))
+}
+
 func TestMessageFormatter(t *testing.T) {
 	t.Parallel()
 
@@ -125,6 +170,8 @@ func TestMessageFormatter(t *testing.T) {
 }
 
 func TestMessageFormatterFormat(t *testing.T) {
+	t.Parallel()
+
 	attrs := map[string]string{
 		"custom_attr": "custom_value",
 	}
@@ -150,4 +197,60 @@ func TestMessageFormatterFormat(t *testing.T) {
 	assert.Contains(t, formattedMessage, defaultContainerDetails.ImageName())
 	assert.Contains(t, formattedMessage, defaultContainerDetails.DaemonName)
 	assert.Contains(t, formattedMessage, attrs["custom_attr"])
+}
+
+func TestPartialLogBuffer(t *testing.T) {
+	t.Parallel()
+
+	b := newPartialLogBuffer()
+
+	assembledLog := &logger.Message{
+		Line:         []byte("Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua."),
+		Timestamp:    time.Now(),
+		PLogMetaData: &backend.PartialLogMetaData{ID: "group_id"},
+	}
+
+	log, last := b.Append(
+		&logger.Message{
+			Line:         []byte("Lorem ipsum dolor sit amet, "),
+			Timestamp:    assembledLog.Timestamp,
+			PLogMetaData: &backend.PartialLogMetaData{ID: "group_id"},
+		},
+	)
+	require.False(t, last)
+	require.Nil(t, log)
+
+	log, last = b.Append(
+		&logger.Message{
+			Line:         []byte("consectetur adipiscing elit, "),
+			Timestamp:    time.Now(),
+			PLogMetaData: &backend.PartialLogMetaData{ID: "group_id"},
+		},
+	)
+	require.False(t, last)
+	require.Nil(t, log)
+
+	log, last = b.Append(
+		&logger.Message{
+			Line:         []byte("sed do eiusmod tempor incididunt ut labore et dolore magna aliqua."),
+			Timestamp:    time.Now(),
+			PLogMetaData: &backend.PartialLogMetaData{ID: "group_id", Last: true},
+		},
+	)
+	require.True(t, last)
+	require.NotNil(t, log)
+
+	assert.Equal(t, string(assembledLog.Line), string(log.Line))
+	assert.Equal(t, assembledLog.Timestamp, log.Timestamp)
+
+	// check delete log after assembled chunks
+	log, last = b.Append(
+		&logger.Message{
+			Line:         []byte("must be first"),
+			Timestamp:    time.Now(),
+			PLogMetaData: &backend.PartialLogMetaData{ID: "group_id"},
+		},
+	)
+	require.False(t, last)
+	require.Nil(t, log)
 }
