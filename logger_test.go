@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"strings"
 	"sync"
 )
 
@@ -82,6 +83,28 @@ func TestTelegramLoggerLog(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTelegramLoggerLog_Truncate(t *testing.T) {
+	t.Parallel()
+
+	formatter, err := newMessageFormatter(defaultContainerDetails, nil, "{log}")
+	assert.NoError(t, err)
+
+	longMessage := strings.Repeat("a", maxLogSize+1)
+
+	client := &mockClient{}
+	client.On("SendMessage", longMessage[:maxLogSize]).Return(nil)
+
+	telegramLogger := &TelegramLogger{
+		client:    client,
+		logger:    zap.NewNop(),
+		formatter: formatter,
+		cfg:       &loggerConfig{},
+	}
+
+	err = telegramLogger.Log(&logger.Message{Line: []byte(longMessage)})
+	assert.NoError(t, err)
 }
 
 func TestTelegramLoggerLog_PartialLog(t *testing.T) {
