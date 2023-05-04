@@ -12,11 +12,16 @@ import (
 	"go.uber.org/zap"
 )
 
-const driverName = "telegram"
+const (
+	// driverName is the name of the driver.
+	driverName = "telegram"
 
-// defaultBufSize provides a reasonable default for loggers that do
-// not have an external limit to impose on log line size.
-const defaultBufSize = 16 * 1024
+	// defaultBufSize is the default buffer size for the logger.
+	defaultBufSize = 16 * 1024
+
+	// maxLogSize is the maximum size of a log message in bytes.
+	maxLogSize = 4096
+)
 
 var (
 	errUnknownTag   = errors.New("unknown tag")
@@ -107,6 +112,10 @@ func (l *TelegramLogger) Log(log *logger.Message) error {
 	}
 
 	text := l.formatter.Format(log)
+	if len(text) > maxLogSize {
+		text = text[:maxLogSize]
+	}
+
 	return l.client.SendMessage(text)
 }
 
