@@ -24,7 +24,7 @@
     {
       "name": "LOG_LEVEL",
       "description": "Set log level to output for plugin logs. Valid values are: debug, info, warn, error, fatal, panic.",
-      "value": "debug",
+      "value": "info",
       "settable": [
         "value"
       ]
