@@ -1,5 +1,9 @@
 # Telegram Log Driver
 
+[![pkg-img]][pkg-url]
+[![version-img]][version-url]
+[![license-img]][license-url]
+
 This Docker plugin allows you to collect logs from your containers and send them to a specified Telegram chat using a Telegram Bot.
 
 ## Installation
@@ -117,3 +121,11 @@ services:
 ```
 
 In both examples, replace `<bot_token>` with your Telegram Bot token and `<chat_id>` with the chat ID where the logs will be sent.
+
+
+[pkg-img]: https://pkg.go.dev/badge/sklyar/docker-log-driver-telegram
+[pkg-url]: https://pkg.go.dev/github.com/sklyar/docker-log-driver-telegram
+[version-img]: https://img.shields.io/github/v/release/sklyar/docker-log-driver-telegram
+[version-url]: https://github.com/sklyar/docker-log-driver-telegram/releases
+[license-img]: https://img.shields.io/github/license/sklyar/docker-log-driver-telegram
+[license-url]: https://raw.githubusercontent.com/sklyar/docker-log-driver-telegram/master/LICENSE
