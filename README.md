@@ -97,7 +97,7 @@ To specify additional logging driver options, you can use the `–log-opt NAME=V
 | template     | No        | {log}                    | The Go template to format the log message. By default, the log will be sent as is. Example: `--log-opt template="{container_name}: {log}"`.                                                                                                     |
 | filter-regex | No        |                          | A regular expression to filter logs. Only logs that match the regex will be sent to the Telegram Bot. Example: `--log-opt filter-regex="ERROR\|WARN"`                                                                                           |
 
-## Available tags for the log template
+### Available tags for the log template
 
 To customize the log message format using the `template` option, you can use the following tags:
 
