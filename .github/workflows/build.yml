@@ -10,12 +10,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: "1.21"
+          go-version: "1.23.2"
 
       - name: Go Tidy
         run: go mod tidy && git diff --exit-code
@@ -24,7 +24,7 @@ jobs:
         run: go mod download
 
       - name: Login to DockerHub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: sklyarx
           password: ${{ secrets.DOCKERHUB_TOKEN }}
