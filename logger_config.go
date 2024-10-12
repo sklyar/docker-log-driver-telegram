@@ -19,6 +19,9 @@ const (
 
 	cfgTemplateKey    = "template"
 	cfgFilterRegexKey = "filter-regex"
+
+	cfgBatchingEnabledKey     = "batching-enabled"
+	cfgBatchingMaxWaitTimeKey = "batching-max-wait-time"
 )
 
 type loggerConfig struct {
@@ -28,10 +31,15 @@ type loggerConfig struct {
 
 	Template    string
 	FilterRegex *regexp.Regexp
+
+	BatchEnabled bool
+	BatchMaxWait time.Duration
 }
 
 var defaultLoggerConfig = loggerConfig{
-	Template: "{log}",
+	Template:     "{log}",
+	BatchEnabled: true,
+	BatchMaxWait: 3 * time.Second,
 }
 
 var defaultClientConfig = ClientConfig{
@@ -50,11 +58,9 @@ func parseLoggerConfig(containerDetails *ContainerDetails) (*loggerConfig, error
 		return nil, fmt.Errorf("failed to parse extra attributes: %w", err)
 	}
 
-	cfg := loggerConfig{
-		ClientConfig: clientConfig,
-		Attrs:        attrs,
-		Template:     defaultLoggerConfig.Template,
-	}
+	cfg := defaultLoggerConfig
+	cfg.ClientConfig = clientConfig
+	cfg.Attrs = attrs
 
 	if template, ok := containerDetails.Config[cfgTemplateKey]; ok {
 		cfg.Template = template
@@ -64,6 +70,23 @@ func parseLoggerConfig(containerDetails *ContainerDetails) (*loggerConfig, error
 		cfg.FilterRegex, err = regexp.Compile(filterRegex)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse %q option: %w", cfgFilterRegexKey, err)
+		}
+	}
+
+	if batchingEnabled, ok := containerDetails.Config[cfgBatchingEnabledKey]; ok {
+		cfg.BatchEnabled, err = parseBool(batchingEnabled, true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse %q option: %w", cfgBatchingEnabledKey, err)
+		}
+	}
+
+	if maxWaitTime, ok := containerDetails.Config[cfgBatchingMaxWaitTimeKey]; ok {
+		cfg.BatchMaxWait, err = time.ParseDuration(maxWaitTime)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse %q option: %w", cfgBatchingMaxWaitTimeKey, err)
+		}
+		if cfg.BatchMaxWait < 1*time.Second {
+			return nil, fmt.Errorf("invalid %q option: %s", cfgBatchingMaxWaitTimeKey, cfg.BatchMaxWait)
 		}
 	}
 
@@ -84,7 +107,15 @@ func (c loggerConfig) Validate(opts map[string]string) error {
 func validateDriverOptions(opts map[string]string) error {
 	for opt := range opts {
 		switch opt {
-		case cfgURLKey, cfgTokenKey, cfgChatIDKey, cfgRetriesKey, cfgTimeoutKey, cfgTemplateKey, cfgFilterRegexKey:
+		case cfgURLKey,
+			cfgTokenKey,
+			cfgChatIDKey,
+			cfgRetriesKey,
+			cfgTimeoutKey,
+			cfgTemplateKey,
+			cfgFilterRegexKey,
+			cfgBatchingEnabledKey,
+			cfgBatchingMaxWaitTimeKey:
 		case "max-file", "max-size", "compress", "labels", "labels-regex", "env", "env-regex", "tag":
 		case cfgNoFileKey, cfgKeepFileKey:
 		default:
