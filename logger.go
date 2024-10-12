@@ -3,13 +3,13 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
-	"sync"
-	"time"
-
 	"github.com/docker/docker/daemon/logger"
 	"github.com/valyala/fasttemplate"
 	"go.uber.org/zap"
+	"io"
+	"sync"
+	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -112,8 +112,8 @@ func (l *TelegramLogger) Log(log *logger.Message) error {
 	}
 
 	text := l.formatter.Format(log)
-	if len(text) > maxLogSize {
-		text = text[:maxLogSize]
+	if utf8.RuneCountInString(text) > maxLogSize {
+		text = string([]rune(text)[:maxLogSize])
 	}
 
 	return l.client.SendMessage(text)
