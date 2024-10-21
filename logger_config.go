@@ -20,8 +20,8 @@ const (
 	cfgTemplateKey    = "template"
 	cfgFilterRegexKey = "filter-regex"
 
-	cfgBatchingEnabledKey     = "batching-enabled"
-	cfgBatchingMaxWaitTimeKey = "batching-max-wait-time"
+	cfgBatchEnabledKey       = "batch-enabled"
+	cfgBatchFlushIntervalKey = "batch-flush-interval"
 )
 
 type loggerConfig struct {
@@ -32,14 +32,14 @@ type loggerConfig struct {
 	Template    string
 	FilterRegex *regexp.Regexp
 
-	BatchEnabled bool
-	BatchMaxWait time.Duration
+	BatchEnabled       bool
+	BatchFlushInterval time.Duration
 }
 
 var defaultLoggerConfig = loggerConfig{
-	Template:     "{log}",
-	BatchEnabled: true,
-	BatchMaxWait: 3 * time.Second,
+	Template:           "{log}",
+	BatchEnabled:       true,
+	BatchFlushInterval: 3 * time.Second,
 }
 
 var defaultClientConfig = ClientConfig{
@@ -73,20 +73,20 @@ func parseLoggerConfig(containerDetails *ContainerDetails) (*loggerConfig, error
 		}
 	}
 
-	if batchingEnabled, ok := containerDetails.Config[cfgBatchingEnabledKey]; ok {
+	if batchingEnabled, ok := containerDetails.Config[cfgBatchEnabledKey]; ok {
 		cfg.BatchEnabled, err = parseBool(batchingEnabled, true)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse %q option: %w", cfgBatchingEnabledKey, err)
+			return nil, fmt.Errorf("failed to parse %q option: %w", cfgBatchEnabledKey, err)
 		}
 	}
 
-	if maxWaitTime, ok := containerDetails.Config[cfgBatchingMaxWaitTimeKey]; ok {
-		cfg.BatchMaxWait, err = time.ParseDuration(maxWaitTime)
+	if flushInterval, ok := containerDetails.Config[cfgBatchFlushIntervalKey]; ok {
+		cfg.BatchFlushInterval, err = time.ParseDuration(flushInterval)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse %q option: %w", cfgBatchingMaxWaitTimeKey, err)
+			return nil, fmt.Errorf("failed to parse %q option: %w", cfgBatchFlushIntervalKey, err)
 		}
-		if cfg.BatchMaxWait < 1*time.Second {
-			return nil, fmt.Errorf("invalid %q option: %s", cfgBatchingMaxWaitTimeKey, cfg.BatchMaxWait)
+		if cfg.BatchFlushInterval < 1*time.Second {
+			return nil, fmt.Errorf("invalid %q option: %s", cfgBatchFlushIntervalKey, cfg.BatchFlushInterval)
 		}
 	}
 
@@ -114,8 +114,8 @@ func validateDriverOptions(opts map[string]string) error {
 			cfgTimeoutKey,
 			cfgTemplateKey,
 			cfgFilterRegexKey,
-			cfgBatchingEnabledKey,
-			cfgBatchingMaxWaitTimeKey:
+			cfgBatchEnabledKey,
+			cfgBatchFlushIntervalKey:
 		case "max-file", "max-size", "compress", "labels", "labels-regex", "env", "env-regex", "tag":
 		case cfgNoFileKey, cfgKeepFileKey:
 		default:
