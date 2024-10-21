@@ -92,10 +92,10 @@ func (l *TelegramLogger) Name() string {
 // Log implements the logger.Logger interface.
 func (l *TelegramLogger) Log(log *logger.Message) error {
 	l.mu.RLock()
+	defer l.mu.RUnlock()
 	if l.closed {
 		return errLoggerClosed
 	}
-	defer l.mu.RUnlock()
 
 	if log.PLogMetaData != nil {
 		assembledLog, last := l.partialLogsBuffer.Append(log)
