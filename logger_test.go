@@ -91,10 +91,10 @@ func TestTelegramLoggerLog_Truncate(t *testing.T) {
 	formatter, err := newMessageFormatter(defaultContainerDetails, nil, "{log}")
 	assert.NoError(t, err)
 
-	longMessage := strings.Repeat("a", maxLogSize+1)
+	longMessage := strings.Repeat("a", maxLogMessageChars+1)
 
 	client := &mockClient{}
-	client.On("SendMessage", longMessage[:maxLogSize]).Return(nil)
+	client.On("SendMessage", longMessage[:maxLogMessageChars]).Return(nil)
 
 	telegramLogger := &TelegramLogger{
 		client:    client,

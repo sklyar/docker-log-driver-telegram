@@ -89,7 +89,7 @@ func produceLogs(t *testing.T, loggerMock *telegramLoggerMock, count int, fifoPa
 }
 
 func setupDriver(t *testing.T) *Driver {
-	driver := NewDriver(zap.NewNop())
+	driver := NewDriver(context.Background(), zap.NewNop())
 	tempDir := t.TempDir()
 	driver.fs = &fsMock{basePath: tempDir}
 	return driver

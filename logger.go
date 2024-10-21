@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"github.com/docker/docker/daemon/logger"
@@ -16,16 +18,17 @@ const (
 	// driverName is the name of the driver.
 	driverName = "telegram"
 
-	// defaultBufSize is the default buffer size for the logger.
-	defaultBufSize = 16 * 1024
+	// maxLogMessageChars defines the maximum number of characters allowed in a Telegram message (4096 Unicode characters).
+	maxLogMessageChars = 4096
 
-	// maxLogSize is the maximum size of a log message in bytes.
-	maxLogSize = 4096
+	// maxLogMessageBytes defines the maximum number of bytes that can be occupied by a Telegram message,
+	// assuming that the most complex characters (such as emoji) may use up to 4 bytes per character.
+	maxLogMessageBytes = 4 * maxLogMessageChars // 16,384 bytes
 )
 
 var (
 	errUnknownTag   = errors.New("unknown tag")
-	errLoggerClosed = errors.New("logger closed")
+	errLoggerClosed = errors.New("logger is closed")
 )
 
 // client is an interface that represents a Telegram client.
@@ -51,7 +54,7 @@ type TelegramLogger struct {
 var _ = (logger.Logger)(&TelegramLogger{})
 
 // NewTelegramLogger creates a new TelegramLogger.
-func NewTelegramLogger(logger *zap.Logger, containerDetails *ContainerDetails) (*TelegramLogger, error) {
+func NewTelegramLogger(ctx context.Context, logger *zap.Logger, containerDetails *ContainerDetails) (*TelegramLogger, error) {
 	cfg, err := parseLoggerConfig(containerDetails)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse logger config: %w", err)
@@ -112,8 +115,10 @@ func (l *TelegramLogger) Log(log *logger.Message) error {
 	}
 
 	text := l.formatter.Format(log)
-	if utf8.RuneCountInString(text) > maxLogSize {
-		text = string([]rune(text)[:maxLogSize])
+	// Truncate the message if it exceeds the maximum number of characters allowed in a Telegram message.
+	// It's temprorary solution, we should implement option to split message into multiple messages.
+	if utf8.RuneCountInString(text) > maxLogMessageChars {
+		text = string([]rune(text)[:maxLogMessageChars])
 	}
 
 	return l.client.SendMessage(text)
@@ -193,7 +198,6 @@ func (f *messageFormatter) tagFunc(msg *logger.Message) fasttemplate.TagFunc {
 			return w.Write([]byte(f.containerDetails.ImageName()))
 		case "daemon_name":
 			return w.Write([]byte(f.containerDetails.DaemonName))
-
 		}
 
 		if value, ok := f.attrs[tag]; ok {
@@ -202,6 +206,102 @@ func (f *messageFormatter) tagFunc(msg *logger.Message) fasttemplate.TagFunc {
 
 		return 0, fmt.Errorf("%w: %s", errUnknownTag, tag)
 	}
+}
+
+type logBuffer struct {
+	logger *zap.Logger
+	client client
+
+	flushInterval time.Duration
+	batchSize     int
+
+	logs    []string
+	mu      sync.Mutex
+	flushCh chan struct{}
+}
+
+func newLogBuffer(logger *zap.Logger, client client, flushInterval time.Duration, batchSize int) *logBuffer {
+	buf := &logBuffer{
+		logger:        logger,
+		client:        client,
+		flushInterval: flushInterval,
+		batchSize:     batchSize,
+		logs:          make([]string, 0, batchSize),
+		flushCh:       make(chan struct{}),
+	}
+
+	return buf
+}
+
+func (b *logBuffer) Append(log string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.logs = append(b.logs, log)
+	if len(b.logs) >= b.batchSize {
+		select {
+		case b.flushCh <- struct{}{}:
+		default: // Do nothing if the channel is full.
+		}
+	}
+}
+
+func (b *logBuffer) StartFlushTimer(ctx context.Context) {
+	ticker := time.NewTicker(b.flushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			log, ok := b.flush()
+			if !ok {
+				continue
+			}
+			if err := b.client.SendMessage(log); err != nil {
+				b.logger.With(zap.String("log", log)).Error("failed to send log message", zap.Error(err))
+				continue
+			}
+		case <-b.flushCh:
+			log, ok := b.flush()
+			if !ok {
+				continue
+			}
+			if err := b.client.SendMessage(log); err != nil {
+				b.logger.With(zap.String("log", log)).Error("failed to send log message", zap.Error(err))
+				continue
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (b *logBuffer) flush() (string, bool) {
+	if len(b.logs) == 0 {
+		return "", false
+	}
+	if len(b.logs) == 1 {
+		return b.logs[0], true
+	}
+
+	buf := bytes.NewBufferString(b.logs[0])
+	buf.Grow(maxLogMessageBytes)
+
+	var lastIdx int
+	for i, log := range b.logs[1:] {
+		if buf.Len()+len(log)+1 > maxLogMessageBytes { // +1 for newline
+			break
+		}
+
+		buf.WriteRune('\n')
+		buf.WriteString(log)
+
+		lastIdx = i
+	}
+
+	b.logs = b.logs[lastIdx+1:]
+
+	return buf.String(), true
 }
 
 type partialLogBuffer struct {
@@ -230,7 +330,7 @@ func (b *partialLogBuffer) Append(log *logger.Message) (*logger.Message, bool) {
 
 		b.logs[plog.PLogMetaData.ID] = plog
 
-		plog.Line = make([]byte, 0, defaultBufSize)
+		plog.Line = make([]byte, 0, 16*1024) // 16KB. Arbitrary size
 		plog.PLogMetaData = nil
 	}
 

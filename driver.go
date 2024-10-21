@@ -40,13 +40,13 @@ type Driver struct {
 	zapLogger *zap.Logger
 }
 
-func NewDriver(zapLogger *zap.Logger) *Driver {
+func NewDriver(ctx context.Context, zapLogger *zap.Logger) *Driver {
 	driver := &Driver{
 		streams:          make(map[string]*logStream),
 		containerStreams: make(map[string]*logStream),
 		fs:               osFS{},
 		newTelegramLogger: func(logger *zap.Logger, details *ContainerDetails) (telegramLogger, error) {
-			return NewTelegramLogger(logger, details)
+			return NewTelegramLogger(ctx, logger, details)
 		},
 		zapLogger: zapLogger,
 	}
