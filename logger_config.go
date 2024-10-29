@@ -85,7 +85,7 @@ func validateDriverOptions(opts map[string]string) error {
 	for opt := range opts {
 		switch opt {
 		case cfgURLKey, cfgTokenKey, cfgChatIDKey, cfgRetriesKey, cfgTimeoutKey, cfgTemplateKey, cfgFilterRegexKey:
-		case "max-file", "max-size", "compress", "labels", "labels-regex", "env", "env-regex", "tag":
+		case "max-file", "max-size", "compress", "labels", "labels-regex", "env", "env-regex", "tag", "mode", "max-buffer-size":
 		case cfgNoFileKey, cfgKeepFileKey:
 		default:
 			return fmt.Errorf("unknown log opt '%s' for telegram log driver", opt)
