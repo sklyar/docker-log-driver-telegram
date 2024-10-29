@@ -133,6 +133,29 @@ func TestDriverStartLogging(t *testing.T) {
 	loggerMock.AssertExpectations(t)
 }
 
+func TestDriverStartLogging_FailedToInitTelegramLogger(t *testing.T) {
+	t.Parallel()
+
+	driver := setupDriver(t)
+	driver.newTelegramLogger = func(logger *zap.Logger, details *ContainerDetails) (telegramLogger, error) {
+		l, err := NewTelegramLogger(logger, details)
+		if err != nil {
+			return nil, assert.AnError
+		}
+
+		return l, nil
+	}
+
+	fifoPath := createTempFifo(t, driver.fs.BasePath())
+	containerDetails := &ContainerDetails{
+		ContainerID: "testcontainer",
+		Config:      map[string]string{},
+	}
+
+	_, err := driver.StartLogging(fifoPath, containerDetails)
+	assert.ErrorIs(t, err, assert.AnError)
+}
+
 func TestDriverStartLogging_AlreadyLogging(t *testing.T) {
 	t.Parallel()
 
