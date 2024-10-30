@@ -46,7 +46,11 @@ func NewDriver(ctx context.Context, zapLogger *zap.Logger) *Driver {
 		containerStreams: make(map[string]*logStream),
 		fs:               osFS{},
 		newTelegramLogger: func(logger *zap.Logger, details *ContainerDetails) (telegramLogger, error) {
-			return NewTelegramLogger(ctx, logger, details)
+			l, err := NewTelegramLogger(ctx, logger, details)
+			if err != nil {
+				return nil, err
+			}
+			return l, nil
 		},
 		zapLogger: zapLogger,
 	}
@@ -76,13 +80,15 @@ func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDeta
 	}
 
 	defer func(stream *logStream) {
-		if err != nil {
-			if err := stream.Close(); err != nil {
-				d.zapLogger.Error("failed to close stream", zap.Error(err))
-			}
-
-			stream = nil
+		if err == nil || stream == nil {
+			return
 		}
+
+		if err := stream.Close(); err != nil {
+			d.zapLogger.Error("failed to close stream", zap.Error(err))
+		}
+
+		stream = nil
 	}(stream)
 
 	noFile, err := parseBool(containerDetails.Config[cfgNoFileKey], false)
