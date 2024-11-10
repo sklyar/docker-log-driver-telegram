@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"strings"
-	"sync"
 )
 
 var defaultContainerDetails = &ContainerDetails{
@@ -32,57 +31,32 @@ func (c *mockClient) SendMessage(message string) error {
 	return args.Error(0)
 }
 
-func TestTelegramLoggerLog(t *testing.T) {
+func TestTelegramLogger_Log_NoBuffer(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name    string
-		message string
-		closed  bool
-	}{
-		{
-			name:    "ok",
-			message: "test",
-			closed:  true,
-		},
-		{
-			name:   "closed",
-			closed: true,
-		},
+	zapLogger := zap.NewNop()
+	containerDetails := *defaultContainerDetails
+	containerDetails.Config = map[string]string{
+		cfgTokenKey:         "token",
+		cfgChatIDKey:        "chat_id",
+		cfgBatchEnabledKey:  "false",
+		cfgMaxBufferSizeKey: "0",
 	}
 
-	for _, tt := range tests {
-		tt := tt
+	client := &mockClient{}
+	client.On("SendMessage", "message1").Return(nil)
+	client.On("SendMessage", "message2").Return(nil)
 
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+	l, err := NewTelegramLogger(zapLogger, &containerDetails)
+	require.NoError(t, err)
 
-			formatter, err := newMessageFormatter(defaultContainerDetails, nil, "{log}")
-			assert.NoError(t, err)
+	l.client = client
 
-			client := &mockClient{}
-			client.On("SendMessage", tt.message).Return(nil)
+	err = l.Log(&logger.Message{Line: []byte("message1")})
+	require.NoError(t, err)
 
-			telegramLogger := &TelegramLogger{
-				client:    client,
-				logger:    zap.NewNop(),
-				formatter: formatter,
-				cfg:       &loggerConfig{},
-			}
-
-			if tt.closed {
-				err := telegramLogger.Close()
-				assert.NoError(t, err)
-			}
-
-			err = telegramLogger.Log(&logger.Message{Line: []byte(tt.message)})
-			if tt.closed {
-				assert.Equal(t, errLoggerClosed, err)
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
+	err = l.Log(&logger.Message{Line: []byte("message2")})
+	require.NoError(t, err)
 }
 
 func TestTelegramLoggerLog_Truncate(t *testing.T) {
@@ -138,7 +112,6 @@ func TestTelegramLoggerLog_PartialLog(t *testing.T) {
 		partialLogsBuffer: newPartialLogBuffer(),
 		formatter:         formatter,
 		cfg:               &loggerConfig{},
-		mu:                sync.RWMutex{},
 		logger:            zap.NewNop(),
 	}
 

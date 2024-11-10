@@ -1,19 +1,14 @@
 package main
 
 import (
-	"context"
 	"fmt"
-	"net/http"
-	_ "net/http/pprof"
-	"os"
-	"os/signal"
-	"sync"
-	"syscall"
-
 	"github.com/docker/docker/daemon/logger"
 	"github.com/docker/go-plugins-helpers/sdk"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"net/http"
+	_ "net/http/pprof"
+	"os"
 )
 
 const pluginManifest = `{"Implements": ["LoggingDriver"]}`
@@ -39,31 +34,14 @@ func main() {
 		zap.String("environment", env),
 	)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	driver := NewDriver(ctx, zapLogger)
+	driver := NewDriver(zapLogger)
 
 	sdkHandler := sdk.NewHandler(pluginManifest)
 	srv := NewServer(zapLogger, sdkHandler, driver)
 
-	var wg sync.WaitGroup
-	wg.Add(3)
-
-	go func() {
-		defer wg.Done()
-		defer cancel()
-
-		if err := srv.Serve(); err != nil {
-			zapLogger.Error("failed to start Server", zap.Error(err))
-		}
-	}()
-
 	pprofPort := os.Getenv("PPROF_PORT")
 	if pprofPort != "" {
 		go func() {
-			defer wg.Done()
-			defer cancel()
 
 			zapLogger.Info("starting pprof Server", zap.String("port", pprofPort))
 			if err := http.ListenAndServe(fmt.Sprintf(":%s", pprofPort), nil); err != nil {
@@ -72,7 +50,9 @@ func main() {
 		}()
 	}
 
-	wg.Wait()
+	if err := srv.Serve(); err != nil {
+		zapLogger.Error("failed to start Server", zap.Error(err))
+	}
 }
 
 func newLogger(env string, logLevel string) (*zap.Logger, error) {
