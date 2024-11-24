@@ -74,11 +74,17 @@ func NewTelegramLogger(
 		return nil, fmt.Errorf("failed to create Telegram Client: %w", err)
 	}
 
+	bufferCapacity := 10_000
+	if cfg.MaxBufferSize <= 0 {
+		bufferCapacity = 0
+	}
+	buffer := make(chan string, bufferCapacity)
+
 	l := &TelegramLogger{
 		client:            client,
 		formatter:         formatter,
 		cfg:               cfg,
-		buffer:            make(chan string, cfg.MaxBufferSize),
+		buffer:            buffer,
 		partialLogsBuffer: newPartialLogBuffer(),
 		closed:            make(chan struct{}),
 		logger:            logger,
@@ -146,7 +152,7 @@ func (l *TelegramLogger) Log(log *logger.Message) error {
 
 func (l *TelegramLogger) enqueue(log string) error {
 	if l.cfg.MaxBufferSize <= 0 {
-		l.buffer <- log // May block
+		l.buffer <- log // May block.
 		return nil
 	}
 
@@ -160,7 +166,6 @@ func (l *TelegramLogger) enqueue(log string) error {
 		return errLoggerClosed
 	default:
 		// Buffer is full.
-
 		select {
 		case <-l.buffer:
 			// Drop the oldest message.
@@ -214,12 +219,17 @@ func (l *TelegramLogger) runBatching() {
 		batchRuneCount int
 	)
 
-	const maxBytes = 4 * maxLogMessageChars // unicode characters are up to 4 bytes
+	const maxBytes = 4 * maxLogMessageChars // Unicode characters are up to 4 bytes
 	batch.Grow(maxBytes)
 
 	flush := func() {
 		if batch.Len() == 0 {
 			return
+		}
+
+		if batch.Bytes()[batch.Len()-1] == '\n' {
+			batch.Truncate(batch.Len() - 1)
+			batchRuneCount--
 		}
 
 		if err := l.client.SendMessage(batch.String()); err != nil {
@@ -232,13 +242,14 @@ func (l *TelegramLogger) runBatching() {
 
 	add := func(log string) {
 		logLength := utf8.RuneCountInString(log) + 1
-		if batchRuneCount+logLength > maxLogMessageChars {
-			flush()
-		}
 
 		batch.WriteString(log)
 		batch.WriteByte('\n')
 		batchRuneCount += logLength
+
+		if batchRuneCount >= maxLogMessageChars {
+			flush()
+		}
 	}
 
 	drain := func() {

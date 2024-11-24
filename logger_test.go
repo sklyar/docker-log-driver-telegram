@@ -59,26 +59,122 @@ func TestTelegramLogger_Log_NoBuffer(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestTelegramLogger_Log_Buffer(t *testing.T) {
+	t.Parallel()
+
+	zapLogger := zap.NewNop()
+	containerDetails := *defaultContainerDetails
+	containerDetails.Config = map[string]string{
+		cfgTokenKey:              "token",
+		cfgChatIDKey:             "chat_id",
+		cfgBatchEnabledKey:       "true",
+		cfgBatchFlushIntervalKey: "1s",
+	}
+
+	// 4 logs with 255 characters each + 1 newline
+	logs := generateLogs(5, (maxLogMessageChars/4)-1)
+	joinedLogs := strings.Join(logs[:4], "\n")
+
+	sent := make(chan struct{}, 1)
+
+	client := &mockClient{}
+	client.On("SendMessage", joinedLogs).
+		Return(nil).
+		Run(func(args mock.Arguments) {
+			sent <- struct{}{}
+		})
+	client.On("SendMessage", logs[4]).
+		Return(nil)
+
+	l, err := NewTelegramLogger(zapLogger, &containerDetails)
+	require.NoError(t, err)
+
+	l.client = client
+
+	for _, message := range logs {
+		err = l.Log(&logger.Message{Line: []byte(message)})
+		assert.NoError(t, err)
+	}
+
+	select {
+	case <-sent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for message to be sent")
+	}
+
+	err = l.Close()
+	require.NoError(t, err)
+
+	client.AssertExpectations(t)
+}
+
+func TestTelegramLogger_Log_Buffer_Drain(t *testing.T) {
+	t.Parallel()
+
+	zapLogger := zap.NewNop()
+	containerDetails := *defaultContainerDetails
+	containerDetails.Config = map[string]string{
+		cfgTokenKey:              "token",
+		cfgChatIDKey:             "chat_id",
+		cfgBatchEnabledKey:       "true",
+		cfgBatchFlushIntervalKey: "1m",
+	}
+
+	logs := generateLogs(5, 256)
+
+	client := &mockClient{}
+	client.On("SendMessage", strings.Join(logs, "\n")).
+		Return(nil)
+
+	l, err := NewTelegramLogger(zapLogger, &containerDetails)
+	require.NoError(t, err)
+
+	l.client = client
+
+	for _, message := range logs {
+		err = l.Log(&logger.Message{Line: []byte(message)})
+		assert.NoError(t, err)
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	err = l.Close()
+	require.NoError(t, err)
+
+	client.AssertExpectations(t)
+}
+
 func TestTelegramLoggerLog_Truncate(t *testing.T) {
 	t.Parallel()
 
-	formatter, err := newMessageFormatter(defaultContainerDetails, nil, "{log}")
-	assert.NoError(t, err)
+	zapLogger := zap.NewNop()
+	containerDetails := *defaultContainerDetails
+	containerDetails.Config = map[string]string{
+		cfgTokenKey:         "token",
+		cfgChatIDKey:        "chat_id",
+		cfgBatchEnabledKey:  "false",
+		cfgMaxBufferSizeKey: "0",
+	}
 
 	longMessage := strings.Repeat("a", maxLogMessageChars+1)
 
 	client := &mockClient{}
 	client.On("SendMessage", longMessage[:maxLogMessageChars]).Return(nil)
+	client.On("SendMessage", longMessage[maxLogMessageChars:]).Return(nil)
 
-	telegramLogger := &TelegramLogger{
-		client:    client,
-		logger:    zap.NewNop(),
-		formatter: formatter,
-		cfg:       &loggerConfig{},
-	}
-
-	err = telegramLogger.Log(&logger.Message{Line: []byte(longMessage)})
+	formatter, err := newMessageFormatter(defaultContainerDetails, nil, "{log}")
 	assert.NoError(t, err)
+
+	l, err := NewTelegramLogger(zapLogger, &containerDetails)
+	require.NoError(t, err)
+
+	l.client = client
+	l.formatter = formatter
+
+	err = l.Log(&logger.Message{Line: []byte(longMessage)})
+	require.NoError(t, err)
+
+	client.AssertExpectations(t)
 }
 
 func TestTelegramLoggerLog_PartialLog(t *testing.T) {
@@ -100,24 +196,46 @@ func TestTelegramLoggerLog_PartialLog(t *testing.T) {
 		Line:         []byte("123"),
 		PLogMetaData: &backend.PartialLogMetaData{ID: "group_id"},
 	}
+	_ = assembledLog
 
 	formatter, err := newMessageFormatter(defaultContainerDetails, nil, "{log}")
 	assert.NoError(t, err)
 
-	client := &mockClient{}
-	client.On("SendMessage", string(assembledLog.Line)).Return(nil)
+	sent := make(chan struct{})
 
-	telegramLogger := &TelegramLogger{
-		client:            client,
-		partialLogsBuffer: newPartialLogBuffer(),
-		formatter:         formatter,
-		cfg:               &loggerConfig{},
-		logger:            zap.NewNop(),
+	client := &mockClient{}
+	client.On("SendMessage", string(assembledLog.Line)).
+		Return(nil).
+		Run(func(args mock.Arguments) {
+			sent <- struct{}{}
+		})
+
+	zapLogger := zap.NewNop()
+	containerDetails := *defaultContainerDetails
+	containerDetails.Config = map[string]string{
+		cfgTokenKey:         "token",
+		cfgChatIDKey:        "chat_id",
+		cfgBatchEnabledKey:  "false",
+		cfgMaxBufferSizeKey: "0",
 	}
 
-	assert.NoError(t, telegramLogger.Log(log1))
-	assert.NoError(t, telegramLogger.Log(log2))
-	assert.NoError(t, telegramLogger.Log(log3))
+	l, err := NewTelegramLogger(zapLogger, &containerDetails)
+	require.NoError(t, err)
+
+	l.client = client
+	l.formatter = formatter
+
+	assert.NoError(t, l.Log(log1))
+	assert.NoError(t, l.Log(log2))
+	assert.NoError(t, l.Log(log3))
+
+	select {
+	case <-sent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for message to be sent")
+	}
+
+	client.AssertExpectations(t)
 }
 
 func TestMessageFormatter(t *testing.T) {
@@ -249,4 +367,12 @@ func TestPartialLogBuffer(t *testing.T) {
 	)
 	require.False(t, last)
 	require.Nil(t, log)
+}
+
+func generateLogs(count, size int) []string {
+	logs := make([]string, count)
+	for i := 0; i < count; i++ {
+		logs[i] = strings.Repeat("a", size)
+	}
+	return logs
 }
