@@ -6,6 +6,7 @@ require (
 	github.com/containerd/fifo v1.1.0
 	github.com/docker/docker v27.3.1+incompatible
 	github.com/docker/go-plugins-helpers v0.0.0-20240701071450-45e2431495c8
+	github.com/docker/go-units v0.5.0
 	github.com/pkg/errors v0.9.1
 	github.com/stretchr/testify v1.9.0
 	github.com/valyala/fasttemplate v1.2.2
@@ -27,7 +28,6 @@ require (
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/go-connections v0.5.0 // indirect
 	github.com/docker/go-metrics v0.0.1 // indirect
-	github.com/docker/go-units v0.5.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/klauspost/compress v1.17.10 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
