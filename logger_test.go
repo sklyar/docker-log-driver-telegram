@@ -241,6 +241,8 @@ func TestTelegramLoggerLog_Truncate(t *testing.T) {
 	err = l.Log(&logger.Message{Line: []byte(longMessage)})
 	require.NoError(t, err)
 
+	require.NoError(t, l.Close())
+
 	client.AssertExpectations(t)
 }
 
