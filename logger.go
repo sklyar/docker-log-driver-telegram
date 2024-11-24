@@ -17,8 +17,11 @@ const (
 	// driverName is the name of the driver.
 	driverName = "telegram"
 
-	// maxLogMessageChars defines the maximum number of characters allowed in a Telegram message (4096 Unicode characters).
-	maxLogMessageChars = 4096
+	// defaultLogMessageChars is the default maximum number of characters in a log message.
+	defaultLogMessageChars = 4096
+
+	// defaultBufferCapacity is the default buffer capacity of the logger.
+	defaultBufferCapacity = 10_000
 )
 
 var (
@@ -31,13 +34,33 @@ type client interface {
 	SendMessage(message string) error
 }
 
+// TelegramLoggerOption is a function that configures a TelegramLogger.
+type TelegramLoggerOption func(*TelegramLogger)
+
+// WithBufferCapacity sets the buffer capacity of the logger.
+func WithBufferCapacity(capacity int) TelegramLoggerOption {
+	return func(l *TelegramLogger) {
+		if capacity > 0 {
+			l.buffer = make(chan string, capacity)
+		}
+	}
+}
+
+// WithMaxLogMessageChars sets the maximum number of characters in a log message.
+func WithMaxLogMessageChars(maxLen int) TelegramLoggerOption {
+	return func(l *TelegramLogger) {
+		l.maxLogMessageChars = maxLen
+	}
+}
+
 // TelegramLogger is a logger that sends logs to Telegram.
 // It implements the logger.Logger interface.
 type TelegramLogger struct {
 	client client
 
-	formatter *messageFormatter
-	cfg       *loggerConfig
+	formatter          *messageFormatter
+	cfg                *loggerConfig
+	maxLogMessageChars int
 
 	buffer chan string
 	mu     sync.Mutex
@@ -55,6 +78,7 @@ var _ = (logger.Logger)(&TelegramLogger{})
 func NewTelegramLogger(
 	logger *zap.Logger,
 	containerDetails *ContainerDetails,
+	opts ...TelegramLoggerOption,
 ) (*TelegramLogger, error) {
 	cfg, err := parseLoggerConfig(containerDetails)
 	if err != nil {
@@ -74,20 +98,25 @@ func NewTelegramLogger(
 		return nil, fmt.Errorf("failed to create Telegram Client: %w", err)
 	}
 
-	bufferCapacity := 10_000
+	bufferCapacity := defaultBufferCapacity
 	if cfg.MaxBufferSize <= 0 {
 		bufferCapacity = 0
 	}
 	buffer := make(chan string, bufferCapacity)
 
 	l := &TelegramLogger{
-		client:            client,
-		formatter:         formatter,
-		cfg:               cfg,
-		buffer:            buffer,
-		partialLogsBuffer: newPartialLogBuffer(),
-		closed:            make(chan struct{}),
-		logger:            logger,
+		client:             client,
+		formatter:          formatter,
+		cfg:                cfg,
+		maxLogMessageChars: defaultLogMessageChars,
+		buffer:             buffer,
+		partialLogsBuffer:  newPartialLogBuffer(),
+		closed:             make(chan struct{}),
+		logger:             logger,
+	}
+
+	for _, opt := range opts {
+		opt(l)
 	}
 
 	l.wg.Add(1)
@@ -127,10 +156,10 @@ func (l *TelegramLogger) Log(log *logger.Message) error {
 
 	text := l.formatter.Format(log)
 	// Split the message if it exceeds the maximum number of characters.
-	if utf8.RuneCountInString(text) > maxLogMessageChars {
+	if utf8.RuneCountInString(text) > l.maxLogMessageChars {
 		runes := []rune(text)
 		for len(runes) > 0 {
-			end := maxLogMessageChars
+			end := l.maxLogMessageChars
 			if len(runes) < end {
 				end = len(runes)
 			}
@@ -219,7 +248,7 @@ func (l *TelegramLogger) runBatching() {
 		batchRuneCount int
 	)
 
-	const maxBytes = 4 * maxLogMessageChars // Unicode characters are up to 4 bytes
+	maxBytes := 4 * l.maxLogMessageChars // Unicode characters are up to 4 bytes
 	batch.Grow(maxBytes)
 
 	flush := func() {
@@ -232,9 +261,7 @@ func (l *TelegramLogger) runBatching() {
 			batchRuneCount--
 		}
 
-		if err := l.client.SendMessage(batch.String()); err != nil {
-			l.logger.Error("failed to send log message", zap.Error(err))
-		}
+		l.send(batch.String())
 
 		batch.Reset()
 		batchRuneCount = 0
@@ -247,7 +274,7 @@ func (l *TelegramLogger) runBatching() {
 		batch.WriteByte('\n')
 		batchRuneCount += logLength
 
-		if batchRuneCount >= maxLogMessageChars {
+		if batchRuneCount >= l.maxLogMessageChars {
 			flush()
 		}
 	}

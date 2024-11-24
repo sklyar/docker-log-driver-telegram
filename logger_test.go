@@ -72,7 +72,7 @@ func TestTelegramLogger_Log_Buffer(t *testing.T) {
 	}
 
 	// 4 logs with 255 characters each + 1 newline
-	logs := generateLogs(5, (maxLogMessageChars/4)-1)
+	logs := generateLogs(5, (defaultLogMessageChars/4)-1)
 	joinedLogs := strings.Join(logs[:4], "\n")
 
 	sent := make(chan struct{}, 1)
@@ -96,11 +96,7 @@ func TestTelegramLogger_Log_Buffer(t *testing.T) {
 		assert.NoError(t, err)
 	}
 
-	select {
-	case <-sent:
-	case <-time.After(3 * time.Second):
-		t.Fatal("timeout waiting for message to be sent")
-	}
+	waitWithTimeout(t, sent, 3*time.Second, "timeout waiting for the message to be sent")
 
 	err = l.Close()
 	require.NoError(t, err)
@@ -144,6 +140,77 @@ func TestTelegramLogger_Log_Buffer_Drain(t *testing.T) {
 	client.AssertExpectations(t)
 }
 
+func TestTelegramLogger_Log_Buffer_Overflow(t *testing.T) {
+	t.Parallel()
+
+	zapLogger := zap.NewNop()
+	containerDetails := *defaultContainerDetails
+	containerDetails.Config = map[string]string{
+		cfgTokenKey:              "token",
+		cfgChatIDKey:             "chat_id",
+		cfgBatchEnabledKey:       "true",
+		cfgBatchFlushIntervalKey: "1m",
+	}
+
+	client := &mockClient{}
+
+	// This blocks the message processing to test buffer overflow behavior.
+	sent1 := make(chan struct{})
+	client.On("SendMessage", "0000").
+		Return(nil).
+		Run(func(args mock.Arguments) {
+			// Notify that message processing has started
+			sent1 <- struct{}{}
+
+			// Block until explicitly released, simulating slow processing
+			<-sent1
+		})
+
+	// Set up second message handler
+	// When buffer overflows, messages "2" and "3" will be batched together
+	// Message "1" will be dropped due to buffer capacity limit
+	sent2 := make(chan struct{})
+	client.On("SendMessage", "2\n3").
+		Return(nil).
+		Run(func(args mock.Arguments) {
+			sent2 <- struct{}{}
+		})
+
+	l, err := NewTelegramLogger(
+		zapLogger,
+		&containerDetails,
+		WithBufferCapacity(2),
+		WithMaxLogMessageChars(4),
+	)
+	require.NoError(t, err)
+
+	l.client = client
+
+	// Send first message.
+	err = l.Log(&logger.Message{Line: []byte("0000")})
+	require.NoError(t, err)
+
+	// Wait for first message to start processing
+	// This ensures the message is in the "sending" state
+	<-sent1
+
+	// Send three more messages while first is blocked:
+	// - Message "1" will be dropped due to buffer overflow
+	// - Messages "2" and "3" will be queued and later batched
+	for _, message := range []string{"1", "2", "3"} {
+		err = l.Log(&logger.Message{Line: []byte(message)})
+		require.NoError(t, err)
+	}
+
+	// Unblock the first message processing
+	// This allows the batched messages to be processed
+	sent1 <- struct{}{}
+
+	waitWithTimeout(t, sent2, 3*time.Second, "timeout waiting for the second message to be sent")
+
+	client.AssertExpectations(t)
+}
+
 func TestTelegramLoggerLog_Truncate(t *testing.T) {
 	t.Parallel()
 
@@ -156,11 +223,11 @@ func TestTelegramLoggerLog_Truncate(t *testing.T) {
 		cfgMaxBufferSizeKey: "0",
 	}
 
-	longMessage := strings.Repeat("a", maxLogMessageChars+1)
+	longMessage := strings.Repeat("a", defaultLogMessageChars+1)
 
 	client := &mockClient{}
-	client.On("SendMessage", longMessage[:maxLogMessageChars]).Return(nil)
-	client.On("SendMessage", longMessage[maxLogMessageChars:]).Return(nil)
+	client.On("SendMessage", longMessage[:defaultLogMessageChars]).Return(nil)
+	client.On("SendMessage", longMessage[defaultLogMessageChars:]).Return(nil)
 
 	formatter, err := newMessageFormatter(defaultContainerDetails, nil, "{log}")
 	assert.NoError(t, err)
@@ -229,11 +296,7 @@ func TestTelegramLoggerLog_PartialLog(t *testing.T) {
 	assert.NoError(t, l.Log(log2))
 	assert.NoError(t, l.Log(log3))
 
-	select {
-	case <-sent:
-	case <-time.After(3 * time.Second):
-		t.Fatal("timeout waiting for message to be sent")
-	}
+	waitWithTimeout(t, sent, 3*time.Second, "timeout waiting for the message to be sent")
 
 	client.AssertExpectations(t)
 }
@@ -375,4 +438,14 @@ func generateLogs(count, size int) []string {
 		logs[i] = strings.Repeat("a", size)
 	}
 	return logs
+}
+
+func waitWithTimeout(t *testing.T, done chan struct{}, timeout time.Duration, args ...any) {
+	t.Helper()
+
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Fatal(args...)
+	}
 }
