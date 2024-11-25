@@ -34,17 +34,21 @@ func TestParseLoggerConfig(t *testing.T) {
 					Retries: defaultClientConfig.Retries,
 					Timeout: defaultClientConfig.Timeout,
 				},
-				Attrs:    make(map[string]string),
-				Template: defaultLoggerConfig.Template,
+				Attrs:              make(map[string]string),
+				Template:           defaultLoggerConfig.Template,
+				MaxBufferSize:      defaultLoggerConfig.MaxBufferSize,
+				BatchEnabled:       defaultLoggerConfig.BatchEnabled,
+				BatchFlushInterval: defaultLoggerConfig.BatchFlushInterval,
 			},
 		},
 		{
 			name: "custom template",
 			containerDetails: ContainerDetails{
 				Config: map[string]string{
-					cfgTokenKey:    "token",
-					cfgChatIDKey:   "chat_id",
-					cfgTemplateKey: "{log}",
+					cfgTokenKey:              "token",
+					cfgChatIDKey:             "chat_id",
+					cfgTemplateKey:           "{log}",
+					cfgBatchFlushIntervalKey: "30s",
 				},
 			},
 			want: loggerConfig{
@@ -55,8 +59,11 @@ func TestParseLoggerConfig(t *testing.T) {
 					Retries: defaultClientConfig.Retries,
 					Timeout: defaultClientConfig.Timeout,
 				},
-				Attrs:    make(map[string]string),
-				Template: "{log}",
+				Attrs:              make(map[string]string),
+				Template:           "{log}",
+				MaxBufferSize:      defaultLoggerConfig.MaxBufferSize,
+				BatchEnabled:       defaultLoggerConfig.BatchEnabled,
+				BatchFlushInterval: 30 * time.Second,
 			},
 		},
 		{
@@ -76,9 +83,36 @@ func TestParseLoggerConfig(t *testing.T) {
 					Retries: defaultClientConfig.Retries,
 					Timeout: defaultClientConfig.Timeout,
 				},
-				Attrs:       make(map[string]string),
-				Template:    defaultLoggerConfig.Template,
-				FilterRegex: regexp.MustCompile(`"ERROR"`),
+				Attrs:              make(map[string]string),
+				Template:           defaultLoggerConfig.Template,
+				MaxBufferSize:      defaultLoggerConfig.MaxBufferSize,
+				FilterRegex:        regexp.MustCompile(`"ERROR"`),
+				BatchEnabled:       defaultLoggerConfig.BatchEnabled,
+				BatchFlushInterval: defaultLoggerConfig.BatchFlushInterval,
+			},
+		},
+		{
+			name: "custom max buffer size",
+			containerDetails: ContainerDetails{
+				Config: map[string]string{
+					cfgTokenKey:         "token",
+					cfgChatIDKey:        "chat_id",
+					cfgMaxBufferSizeKey: "100MB",
+				},
+			},
+			want: loggerConfig{
+				ClientConfig: ClientConfig{
+					APIURL:  defaultClientConfig.APIURL,
+					Token:   "token",
+					ChatID:  "chat_id",
+					Retries: defaultClientConfig.Retries,
+					Timeout: defaultClientConfig.Timeout,
+				},
+				Attrs:              make(map[string]string),
+				Template:           defaultLoggerConfig.Template,
+				MaxBufferSize:      100 * 1024 * 1024, // 100MB
+				BatchEnabled:       defaultLoggerConfig.BatchEnabled,
+				BatchFlushInterval: defaultLoggerConfig.BatchFlushInterval,
 			},
 		},
 		{
@@ -113,6 +147,28 @@ func TestParseLoggerConfig(t *testing.T) {
 				},
 			},
 			wantErr: "failed to parse \"filter-regex\"",
+		},
+		{
+			name: "failed to parse \"batch-flush-interval\"",
+			containerDetails: ContainerDetails{
+				Config: map[string]string{
+					cfgTokenKey:              "token",
+					cfgChatIDKey:             "chat_id",
+					cfgBatchFlushIntervalKey: "invalid",
+				},
+			},
+			wantErr: "failed to parse \"batch-flush-interval\"",
+		},
+		{
+			name: "invalid \"max-buffer-size\"",
+			containerDetails: ContainerDetails{
+				Config: map[string]string{
+					cfgTokenKey:         "token",
+					cfgChatIDKey:        "chat_id",
+					cfgMaxBufferSizeKey: "-1",
+				},
+			},
+			wantErr: "failed to parse \"max-buffer-size\" option",
 		},
 	}
 

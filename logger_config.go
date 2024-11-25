@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/docker/go-units"
 	"regexp"
 	"strconv"
 	"time"
@@ -19,6 +20,11 @@ const (
 
 	cfgTemplateKey    = "template"
 	cfgFilterRegexKey = "filter-regex"
+
+	cfgBatchEnabledKey       = "batch-enabled"
+	cfgBatchFlushIntervalKey = "batch-flush-interval"
+
+	cfgMaxBufferSizeKey = "max-buffer-size"
 )
 
 type loggerConfig struct {
@@ -28,10 +34,18 @@ type loggerConfig struct {
 
 	Template    string
 	FilterRegex *regexp.Regexp
+
+	MaxBufferSize int64
+
+	BatchEnabled       bool
+	BatchFlushInterval time.Duration
 }
 
 var defaultLoggerConfig = loggerConfig{
-	Template: "{log}",
+	Template:           "{log}",
+	BatchEnabled:       true,
+	BatchFlushInterval: 3 * time.Second,
+	MaxBufferSize:      1e6, // 1MB
 }
 
 var defaultClientConfig = ClientConfig{
@@ -50,11 +64,9 @@ func parseLoggerConfig(containerDetails *ContainerDetails) (*loggerConfig, error
 		return nil, fmt.Errorf("failed to parse extra attributes: %w", err)
 	}
 
-	cfg := loggerConfig{
-		ClientConfig: clientConfig,
-		Attrs:        attrs,
-		Template:     defaultLoggerConfig.Template,
-	}
+	cfg := defaultLoggerConfig
+	cfg.ClientConfig = clientConfig
+	cfg.Attrs = attrs
 
 	if template, ok := containerDetails.Config[cfgTemplateKey]; ok {
 		cfg.Template = template
@@ -64,6 +76,36 @@ func parseLoggerConfig(containerDetails *ContainerDetails) (*loggerConfig, error
 		cfg.FilterRegex, err = regexp.Compile(filterRegex)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse %q option: %w", cfgFilterRegexKey, err)
+		}
+	}
+
+	if maxBufferSize, ok := containerDetails.Config[cfgMaxBufferSizeKey]; ok {
+		cfg.MaxBufferSize, err = units.RAMInBytes(maxBufferSize)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse %q option: %w", cfgMaxBufferSizeKey, err)
+		}
+	}
+
+	if batchingEnabled, ok := containerDetails.Config[cfgBatchEnabledKey]; ok {
+		cfg.BatchEnabled, err = parseBool(batchingEnabled, true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse %q option: %w", cfgBatchEnabledKey, err)
+		}
+	}
+
+	if cfg.BatchEnabled {
+		if flushInterval, ok := containerDetails.Config[cfgBatchFlushIntervalKey]; ok {
+			cfg.BatchFlushInterval, err = time.ParseDuration(flushInterval)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse %q option: %w", cfgBatchFlushIntervalKey, err)
+			}
+			if cfg.BatchFlushInterval < 1*time.Second {
+				return nil, fmt.Errorf("invalid %q option: %s", cfgBatchFlushIntervalKey, cfg.BatchFlushInterval)
+			}
+		}
+
+		if cfg.MaxBufferSize == 0 {
+			return nil, fmt.Errorf("batching is enabled but %q option is not set", cfgMaxBufferSizeKey)
 		}
 	}
 
@@ -84,8 +126,17 @@ func (c loggerConfig) Validate(opts map[string]string) error {
 func validateDriverOptions(opts map[string]string) error {
 	for opt := range opts {
 		switch opt {
-		case cfgURLKey, cfgTokenKey, cfgChatIDKey, cfgRetriesKey, cfgTimeoutKey, cfgTemplateKey, cfgFilterRegexKey:
-		case "max-file", "max-size", "compress", "labels", "labels-regex", "env", "env-regex", "tag", "mode", "max-buffer-size":
+		case cfgURLKey,
+			cfgTokenKey,
+			cfgChatIDKey,
+			cfgRetriesKey,
+			cfgTimeoutKey,
+			cfgTemplateKey,
+			cfgFilterRegexKey,
+			cfgBatchEnabledKey,
+			cfgBatchFlushIntervalKey,
+			cfgMaxBufferSizeKey:
+		case "max-file", "max-size", "compress", "labels", "labels-regex", "env", "env-regex", "tag", "mode":
 		case cfgNoFileKey, cfgKeepFileKey:
 		default:
 			return fmt.Errorf("unknown log opt '%s' for telegram log driver", opt)

@@ -2,14 +2,13 @@ package main
 
 import (
 	"fmt"
-	"net/http"
-	_ "net/http/pprof"
-	"os"
-
 	"github.com/docker/docker/daemon/logger"
 	"github.com/docker/go-plugins-helpers/sdk"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"net/http"
+	_ "net/http/pprof"
+	"os"
 )
 
 const pluginManifest = `{"Implements": ["LoggingDriver"]}`
@@ -40,27 +39,20 @@ func main() {
 	sdkHandler := sdk.NewHandler(pluginManifest)
 	srv := NewServer(zapLogger, sdkHandler, driver)
 
-	stop := make(chan struct{})
-
-	go func() {
-		if err := srv.Serve(); err != nil {
-			zapLogger.Error("failed to start Server", zap.Error(err))
-		}
-		stop <- struct{}{}
-	}()
-
 	pprofPort := os.Getenv("PPROF_PORT")
 	if pprofPort != "" {
 		go func() {
+
 			zapLogger.Info("starting pprof Server", zap.String("port", pprofPort))
 			if err := http.ListenAndServe(fmt.Sprintf(":%s", pprofPort), nil); err != nil {
 				zapLogger.Error("failed to start pprof Server", zap.Error(err))
 			}
-			stop <- struct{}{}
 		}()
 	}
 
-	<-stop
+	if err := srv.Serve(); err != nil {
+		zapLogger.Error("failed to start Server", zap.Error(err))
+	}
 }
 
 func newLogger(env string, logLevel string) (*zap.Logger, error) {
