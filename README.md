@@ -104,6 +104,8 @@ Restart Docker after changes: `systemctl restart docker`
 
 ### Template Tags
 
+To customize the log message format using the `template` option, you can use the following tags:
+
 | Tag                 | Description        |
 |---------------------|--------------------|
 | {log}               | Log message        |
