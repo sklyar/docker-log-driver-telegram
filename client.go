@@ -205,7 +205,9 @@ func (c *Client) sendMessage(url string, values url.Values) (*clientResponse, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	var body clientResponse
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {

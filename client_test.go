@@ -34,7 +34,8 @@ func TestSendMessage(t *testing.T) {
 			assert.Equal(t, "text", r.Form.Get("text"))
 
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintln(w, response)
+			_, err = fmt.Fprintln(w, response)
+			assert.NoError(t, err)
 		}))
 	}
 
@@ -99,7 +100,7 @@ func TestSendMessage(t *testing.T) {
 			if attempts <= 2 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusTooManyRequests)
-				fmt.Fprintln(w, `
+				_, err := fmt.Fprintln(w, `
 					{
 						"ok": false,
 						"error_code": 429,
@@ -107,11 +108,13 @@ func TestSendMessage(t *testing.T) {
 						"parameters": {"retry_after": 1}
 					}
 				`)
+				assert.NoError(t, err)
 				return
 			}
 
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintln(w, `{"ok": true}`)
+			_, err := fmt.Fprintln(w, `{"ok": true}`)
+			assert.NoError(t, err)
 		}))
 		defer ts.Close()
 
@@ -148,7 +151,7 @@ func TestSendMessage(t *testing.T) {
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
-			fmt.Fprintln(w, `
+			_, err := fmt.Fprintln(w, `
 				{
 					"ok": false,
 					"error_code": 429,
@@ -156,6 +159,7 @@ func TestSendMessage(t *testing.T) {
 					"parameters": {"retry_after": 1}
 				}
 			`)
+			assert.NoError(t, err)
 		}))
 		defer ts.Close()
 
@@ -205,7 +209,8 @@ func TestPing(t *testing.T) {
 			assert.Equal(t, "/bot123/getChat", r.URL.Path, "Expected path '/bot123/getChat', got '%s'", r.URL.Path)
 			assert.Equal(t, defaultConfig.ChatID, r.Form.Get("chat_id"))
 
-			fmt.Fprintln(w, response)
+			_, err = fmt.Fprintln(w, response)
+			assert.NoError(t, err)
 		}))
 	}
 
@@ -269,7 +274,7 @@ func TestPing(t *testing.T) {
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
-			fmt.Fprintln(w, `
+			_, err := fmt.Fprintln(w, `
 				{
 					"ok": false,
 					"error_code": 429,
@@ -277,6 +282,7 @@ func TestPing(t *testing.T) {
 					"parameters": {"retry_after": 1}
 				}
 			`)
+			assert.NoError(t, err)
 		}))
 		defer ts.Close()
 

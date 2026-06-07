@@ -4,13 +4,14 @@ import (
 	"testing"
 	"time"
 
+	"strings"
+
 	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/daemon/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
-	"strings"
 )
 
 var defaultContainerDetails = &ContainerDetails{
@@ -333,8 +334,6 @@ func TestMessageFormatter(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
-
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -436,7 +435,7 @@ func TestPartialLogBuffer(t *testing.T) {
 
 func generateLogs(count, size int) []string {
 	logs := make([]string, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		logs[i] = strings.Repeat("a", size)
 	}
 	return logs

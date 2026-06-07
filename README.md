@@ -17,7 +17,6 @@ docker run --log-driver=telegram \
   --log-opt token="<bot_token>" \
   --log-opt chat_id="<chat_id>" \
   your_image
-
 ```
 
 ## Installation
@@ -38,6 +37,19 @@ systemctl restart docker
 docker plugin disable telegram --force
 docker plugin rm telegram
 ```
+
+### Plugin Environment
+
+```bash
+docker plugin disable telegram --force
+docker plugin set telegram ENV=production LOG_LEVEL=info
+docker plugin enable telegram
+```
+
+| Variable  | Default     | Description                                                             |
+|-----------|-------------|-------------------------------------------------------------------------|
+| ENV       | development | Plugin runtime environment: `production` or `development`               |
+| LOG_LEVEL | info        | Plugin log level: `debug`, `info`, `warn`, `error`, `fatal`, or `panic` |
 
 ## Configuration
 
@@ -93,14 +105,16 @@ Restart Docker after changes: `systemctl restart docker`
 | chat_id              | Yes      |                          | Target chat ID                                                                               |
 | template             | No       | {log}                    | Message format template                                                                      |
 | filter-regex         | No       |                          | Regex to filter logs                                                                         |
-| retries              | No       | 5                        | Max retry attempts (0 = infinite)                                                            |
+| retries              | No       | 5                        | Retry attempts after the initial request (0 = no retries)                                    |
 | timeout              | No       | 10s                      | API request timeout (units: ns, us/µs, ms, s, m, h)                                          |
 | no-file              | No       | false                    | Disable log files (disables `docker logs`)                                                   |
 | keep-file            | No       | false                    | Keep log files after container stop                                                          |
 | mode                 | No       | blocking                 | Log processing mode: `blocking`/`non-blocking`                                               |
-| max-buffer-size      | No       | 1m                       | Max buffer size (Example values: 32, 32b, 32B, 32k, 32K, 32kb, 32Kb, 32Mb, 32Gb, 32Tb, 32Pb) |
+| max-buffer-size      | No       | 1000000                  | Max buffer size (Example values: 32, 32b, 32B, 32k, 32K, 32kb, 32Kb, 32Mb, 32Gb, 32Tb, 32Pb) |
 | batch-enabled        | No       | true                     | Enable batch sending                                                                         |
 | batch-flush-interval | No       | 3s                       | Batch flush interval (units: ns, us/µs, ms, s, m, h)                                         |
+
+`filter-regex` sends only log messages that match the regex.
 
 ### Template Tags
 
@@ -118,7 +132,10 @@ To customize the log message format using the `template` option, you can use the
 | {image_name}        | Image name         |
 | {daemon_name}       | Docker daemon name |
 
-[pkg-img]: https://pkg.go.dev/badge/sklyar/docker-log-driver-telegram
+Extra attributes populated by Docker from `labels`, `labels-regex`, `env`, and `env-regex` can also be used as template
+tags.
+
+[pkg-img]: https://pkg.go.dev/badge/github.com/sklyar/docker-log-driver-telegram
 
 [pkg-url]: https://pkg.go.dev/github.com/sklyar/docker-log-driver-telegram
 
@@ -128,4 +145,4 @@ To customize the log message format using the `template` option, you can use the
 
 [license-img]: https://img.shields.io/github/license/sklyar/docker-log-driver-telegram
 
-[license-url]: https://raw.githubusercontent.com/sklyar/docker-log-driver-telegram/master/LICENSE
+[license-url]: https://raw.githubusercontent.com/sklyar/docker-log-driver-telegram/main/LICENSE

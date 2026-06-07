@@ -1,20 +1,25 @@
 name: Test
 
+env:
+  GO_VERSION: "1.26.4"
+  GOLANGCI_LINT_VERSION: "v2.12.2"
+
 on:
   push:
-    branches:
   pull_request:
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: "1.23.3"
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Go Tidy
         run: go mod tidy && git diff --exit-code
@@ -25,14 +30,10 @@ jobs:
       - name: Go Mod Verify
         run: go mod verify
 
-      - name: Set up golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-          only-new-issues: true
-
       - name: Lint
-        run: make lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
 
       - name: Test
         run: make test

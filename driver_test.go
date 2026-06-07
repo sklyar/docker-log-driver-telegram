@@ -70,7 +70,7 @@ func produceLogs(t *testing.T, loggerMock *telegramLoggerMock, count int, fifoPa
 	require.NoError(t, err)
 
 	encoder := logdriver.NewLogEntryEncoder(w)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		entry := &logdriver.LogEntry{
 			Source:   "stdout",
 			TimeNano: time.Now().UnixNano(),
@@ -122,7 +122,7 @@ func TestDriverStartLogging(t *testing.T) {
 	assert.False(t, stream.keepFile)
 
 	produceLogs(t, loggerMock, 10, fifoPath)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		select {
 		case <-processedNotifier:
 		case <-time.After(1 * time.Second):
