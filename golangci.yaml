@@ -1,17 +1,16 @@
+version: "2"
 run:
   concurrency: 10
-  timeout: 30m
-  issues-exit-code: 1
-  tests: true
+  go: ""
   build-tags:
     - integration
-  skip-dirs: null
-  skip-dirs-use-default: false
   modules-download-mode: readonly
+  issues-exit-code: 1
+  tests: true
   allow-parallel-runners: false
-  go: ''
+output:
+  path-prefix: ""
 linters:
-  fast: false
   enable:
     - asasalint
     - asciicheck
@@ -19,21 +18,12 @@ linters:
     - bodyclose
     - contextcheck
     - durationcheck
-    - errcheck
     - errname
     - errorlint
-    - exportloopref
     - gocritic
     - godot
-    - gofmt
-    - gofumpt
-    - goimports
     - gomoddirectives
     - gosec
-    - gosimple
-    - govet
-    - ineffassign
-    - interfacer
     - misspell
     - nakedret
     - nilerr
@@ -48,34 +38,29 @@ linters:
     - rowserrcheck
     - sqlclosecheck
     - staticcheck
-    - stylecheck
     - tagliatelle
-    - tenv
     - testableexamples
     - thelper
     - tparallel
     - unconvert
     - unparam
-    - unused
     - usestdlibvars
     - wastedassign
   disable:
     - containedctx
     - cyclop
-    - deadcode
     - decorder
     - depguard
     - dogsled
     - dupl
     - dupword
+    - err113
     - errchkjson
-    - execinquery
     - exhaustive
     - exhaustruct
     - forbidigo
     - forcetypeassert
     - funlen
-    - gci
     - ginkgolinter
     - gocheckcompilerdirectives
     - gochecknoglobals
@@ -84,14 +69,10 @@ linters:
     - goconst
     - gocyclo
     - godox
-    - goerr113
     - goheader
-    - golint
-    - gomnd
     - gomodguard
     - goprintffuncname
     - grouper
-    - ifshort
     - importas
     - interfacebloat
     - ireturn
@@ -99,58 +80,68 @@ linters:
     - loggercheck
     - maintidx
     - makezero
-    - maligned
+    - mnd
     - musttag
     - nestif
     - nlreturn
     - nonamedreturns
-    - nosnakecase
     - nosprintfhostport
     - paralleltest
     - testpackage
-    - typecheck
     - varnamelen
     - whitespace
     - wrapcheck
     - wsl
-linters-settings:
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - experimental
-      - opinionated
-      - performance
-      - style
-    disabled-checks:
-      - hugeParam
-      - rangeExprCopy
-      - rangeValCopy
-  errcheck:
-    exclude-functions:
-      - io/ioutil.ReadFile
-      - io.Copy(*bytes.Buffer)
-      - io.Copy(os.Stdout)
-  govet:
-    disable: null
-  nakedret: null
-  tagliatelle:
-    case:
-      rules:
-        json: snake
-        yaml: snake
-        xml: camel
-        bson: camel
-        avro: snake
-        mapstructure: kebab
-output:
-  format: 'line-number:lint.txt'
-  print-issued-lines: false
-  print-linter-name: true
-  uniq-by-line: false
-  path-prefix: ''
-  sort-results: true
+  settings:
+    errcheck:
+      exclude-functions:
+        - io/ioutil.ReadFile
+        - io.Copy(*bytes.Buffer)
+        - io.Copy(os.Stdout)
+    gocritic:
+      disabled-checks:
+        - hugeParam
+        - rangeExprCopy
+        - rangeValCopy
+      enabled-tags:
+        - diagnostic
+        - experimental
+        - opinionated
+        - performance
+        - style
+    tagliatelle:
+      case:
+        rules:
+          avro: snake
+          bson: camel
+          json: snake
+          mapstructure: kebab
+          xml: camel
+          yaml: snake
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
   new: false
   fix: false
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

@@ -1,5 +1,8 @@
 name: Build
 
+env:
+  GO_VERSION: "1.26.4"
+
 on:
   push:
     tags:
@@ -8,14 +11,16 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: "1.23.3"
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Go Tidy
         run: go mod tidy && git diff --exit-code
@@ -24,7 +29,7 @@ jobs:
         run: go mod download
 
       - name: Login to DockerHub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: sklyarx
           password: ${{ secrets.DOCKERHUB_TOKEN }}

@@ -164,7 +164,11 @@ func (s *Server) readLogsHandler(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	defer lr.Close()
+	defer func() {
+		if err := lr.Close(); err != nil {
+			s.zapLogger.Error("failed to close logs reader", zap.Error(err))
+		}
+	}()
 
 	s.zapLogger.Debug(
 		"read logs request was called for the container",

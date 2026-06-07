@@ -272,9 +272,11 @@ type logReader struct {
 
 // ReadLogs reads logs from json-file logger and writes them to the pipe.
 func (r *logReader) ReadLogs(ctx context.Context) {
-	defer r.w.Close()
+	defer func() {
+		_ = r.w.Close()
+	}()
 
-	logWatcher := r.r.ReadLogs(*r.config)
+	logWatcher := r.r.ReadLogs(ctx, *r.config)
 	defer logWatcher.ConsumerGone()
 
 	encoder := logdriver.NewLogEntryEncoder(r.w)
