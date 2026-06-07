@@ -159,10 +159,7 @@ func (l *TelegramLogger) Log(log *logger.Message) error {
 	if utf8.RuneCountInString(text) > l.maxLogMessageChars {
 		runes := []rune(text)
 		for len(runes) > 0 {
-			end := l.maxLogMessageChars
-			if len(runes) < end {
-				end = len(runes)
-			}
+			end := min(len(runes), l.maxLogMessageChars)
 			slog := string(runes[:end])
 			runes = runes[end:]
 			if err := l.enqueue(slog); err != nil {
