@@ -56,6 +56,34 @@ func TestSendMessage(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
+	t.Run("with topic id", func(t *testing.T) {
+		t.Parallel()
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			err := r.ParseForm()
+			assert.NoError(t, err)
+
+			assert.Equal(t, "456", r.Form.Get("chat_id"))
+			assert.Equal(t, "789", r.Form.Get("message_thread_id"))
+
+			w.Header().Set("Content-Type", "application/json")
+			_, err = fmt.Fprintln(w, `{"ok":true}`)
+			assert.NoError(t, err)
+		}))
+		defer srv.Close()
+
+		logger := zaptest.NewLogger(t)
+		cfg := defaultConfig
+		cfg.APIURL = srv.URL
+		cfg.TopicID = "789"
+
+		c, err := NewClient(logger, cfg)
+		assert.NoError(t, err)
+
+		err = c.SendMessage("text")
+		assert.NoError(t, err)
+	})
+
 	t.Run("bad response", func(t *testing.T) {
 		t.Parallel()
 

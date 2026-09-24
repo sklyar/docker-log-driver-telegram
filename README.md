@@ -61,6 +61,7 @@ Use with `docker run`:
 docker run --log-driver=telegram \
     --log-opt token="<bot_token>" \
     --log-opt chat_id="<chat_id>" \
+    --log-opt topic_id="<topic_id>" \
     --log-opt template="{container_name}: {log}" \
     your_image
 ```
@@ -103,6 +104,7 @@ Restart Docker after changes: `systemctl restart docker`
 | url                  | No       | https://api.telegram.org | Telegram API URL                                                                             |
 | token                | Yes      |                          | Bot API token                                                                                |
 | chat_id              | Yes      |                          | Target chat ID                                                                               |
+| topic_id             | No       |                          | Target forum topic (message thread) ID within the chat                                       |
 | template             | No       | {log}                    | Message format template                                                                      |
 | filter-regex         | No       |                          | Regex to filter logs                                                                         |
 | retries              | No       | 5                        | Retry attempts after the initial request (0 = no retries)                                    |
@@ -115,6 +117,8 @@ Restart Docker after changes: `systemctl restart docker`
 | batch-flush-interval | No       | 3s                       | Batch flush interval (units: ns, us/µs, ms, s, m, h)                                         |
 
 `filter-regex` sends only log messages that match the regex.
+
+`topic_id` sends messages to a specific topic in a Telegram forum supergroup. It must be a positive integer.
 
 ### Template Tags
 

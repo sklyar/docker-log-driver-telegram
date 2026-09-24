@@ -12,6 +12,7 @@ const (
 	cfgURLKey     = "url"
 	cfgTokenKey   = "token"
 	cfgChatIDKey  = "chat_id"
+	cfgTopicIDKey = "topic_id"
 	cfgRetriesKey = "retries"
 	cfgTimeoutKey = "timeout"
 
@@ -129,6 +130,7 @@ func validateDriverOptions(opts map[string]string) error {
 		case cfgURLKey,
 			cfgTokenKey,
 			cfgChatIDKey,
+			cfgTopicIDKey,
 			cfgRetriesKey,
 			cfgTimeoutKey,
 			cfgTemplateKey,
@@ -157,6 +159,17 @@ func parseClientConfig(containerDetails *ContainerDetails) (ClientConfig, error)
 
 	if url, ok := containerDetails.Config[cfgURLKey]; ok {
 		clientConfig.APIURL = url
+	}
+
+	if topicID, ok := containerDetails.Config[cfgTopicIDKey]; ok {
+		id, err := strconv.Atoi(topicID)
+		if err != nil {
+			return clientConfig, fmt.Errorf("failed to parse %q option: %w", cfgTopicIDKey, err)
+		}
+		if id <= 0 {
+			return clientConfig, fmt.Errorf("invalid %q option: %d", cfgTopicIDKey, id)
+		}
+		clientConfig.TopicID = topicID
 	}
 
 	if retries, ok := containerDetails.Config[cfgRetriesKey]; ok {

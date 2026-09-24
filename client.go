@@ -38,6 +38,10 @@ type ClientConfig struct {
 	// ChatID is the Telegram chat ID.
 	ChatID string
 
+	// TopicID is the unique identifier of the target message thread (topic)
+	// of a forum supergroup. Optional.
+	TopicID string
+
 	// Retries is the number of retries to call the Telegram API.
 	Retries int
 
@@ -121,6 +125,9 @@ func (c *Client) SendMessage(text string) error {
 	values := url.Values{
 		"chat_id": {c.cfg.ChatID},
 		"text":    {text},
+	}
+	if c.cfg.TopicID != "" {
+		values.Set("message_thread_id", c.cfg.TopicID)
 	}
 
 	var lastErr error
