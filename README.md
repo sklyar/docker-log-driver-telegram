@@ -61,6 +61,7 @@ Use with `docker run`:
 docker run --log-driver=telegram \
     --log-opt token="<bot_token>" \
     --log-opt chat_id="<chat_id>" \
+    --log-opt topic_id="<topic_id>" \
     --log-opt template="{container_name}: {log}" \
     your_image
 ```
@@ -103,6 +104,7 @@ Restart Docker after changes: `systemctl restart docker`
 | url                  | No       | https://api.telegram.org | Telegram API URL (`http` or `https`); a path such as `/telegram` is kept        |
 | token                | Yes      |                          | Bot API token                                                                   |
 | chat_id              | Yes      |                          | Target chat ID                                                                  |
+| topic_id             | No       |                          | Target forum topic (message thread) ID, must be positive                        |
 | template             | No       | {log}                    | Message format template                                                         |
 | filter-regex         | No       |                          | Regex to filter logs                                                            |
 | retries              | No       | 5                        | Retry attempts after the initial request (0 = no retries)                       |
@@ -115,6 +117,8 @@ Restart Docker after changes: `systemctl restart docker`
 
 `filter-regex` sends only log messages that match the regex. For a very long line, the regex is matched against the
 first 64 KiB.
+
+`topic_id` sends messages to a specific topic in a Telegram forum supergroup. It must be a positive integer.
 
 The Docker options `mode` and `max-buffer-size` are also accepted. Docker uses them itself: with `mode=non-blocking`,
 Docker keeps up to `max-buffer-size` of logs in its own buffer before it passes them to the driver.
