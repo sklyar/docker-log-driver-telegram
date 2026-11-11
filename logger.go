@@ -1,27 +1,38 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
 	"github.com/docker/docker/daemon/logger"
 	"github.com/valyala/fasttemplate"
 	"go.uber.org/zap"
-	"io"
-	"sync"
-	"time"
-	"unicode/utf8"
 )
 
 const (
 	// driverName is the name of the driver.
 	driverName = "telegram"
 
-	// defaultLogMessageChars is the default maximum number of characters in a log message.
+	// defaultLogMessageChars is the default maximum length of a Telegram message.
 	defaultLogMessageChars = 4096
 
-	// defaultBufferCapacity is the default buffer capacity of the logger.
-	defaultBufferCapacity = 10_000
+	// defaultCloseTimeout limits how long Close sends the buffered messages.
+	// Docker waits 30 seconds for the StopLogging request by default.
+	defaultCloseTimeout = 15 * time.Second
+
+	// maxLineBytes limits the size of a line assembled from partial messages.
+	// The message text is truncated to one Telegram message anyway, and
+	// a line without a limit could use all memory of the plugin.
+	maxLineBytes = 64 * 1024
+
+	// truncatedSuffix marks a message that was truncated.
+	truncatedSuffix = "… (truncated)"
 )
 
 var (
@@ -31,52 +42,70 @@ var (
 
 // client is an interface that represents a Telegram client.
 type client interface {
-	SendMessage(message string) error
+	SendMessage(ctx context.Context, message string) error
 }
 
 // TelegramLoggerOption is a function that configures a TelegramLogger.
 type TelegramLoggerOption func(*TelegramLogger)
 
-// WithBufferCapacity sets the buffer capacity of the logger.
-func WithBufferCapacity(capacity int) TelegramLoggerOption {
-	return func(l *TelegramLogger) {
-		if capacity > 0 {
-			l.buffer = make(chan string, capacity)
-		}
-	}
-}
-
-// WithMaxLogMessageChars sets the maximum number of characters in a log message.
+// WithMaxLogMessageChars sets the maximum length of a Telegram message.
 func WithMaxLogMessageChars(maxLen int) TelegramLoggerOption {
 	return func(l *TelegramLogger) {
 		l.maxLogMessageChars = maxLen
 	}
 }
 
+// WithChatLimiters makes the logger use rate limiters that are shared
+// with other loggers.
+func WithChatLimiters(limiters *chatLimiters) TelegramLoggerOption {
+	return func(l *TelegramLogger) {
+		l.limiters = limiters
+	}
+}
+
 // TelegramLogger is a logger that sends logs to Telegram.
 // It implements the logger.Logger interface.
+//
+// Log puts messages into a buffer, and one goroutine sends them.
+// When the buffer is full, Log drops the oldest message.
 type TelegramLogger struct {
-	client client
+	client   client
+	limiters *chatLimiters
 
 	formatter          *messageFormatter
 	cfg                *loggerConfig
 	maxLogMessageChars int
-
-	buffer chan string
-	mu     sync.Mutex
+	closeTimeout       time.Duration
 
 	partialLogsBuffer *partialLogBuffer
 
-	wg     sync.WaitGroup
-	closed chan struct{}
+	// mu makes the closed check and the write to buffer one step,
+	// so that no message gets into the buffer after Close.
+	mu     sync.Mutex
+	closed bool
+	buffer chan string
+
+	// stop is closed by Close. Then the sending goroutine sends
+	// the buffered messages and closes done.
+	stop chan struct{}
+	done chan struct{}
+
+	// ctx is canceled when the close timeout expires.
+	// It stops the message that is being sent.
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// dropped counts the messages that were dropped and not reported yet.
+	dropped atomic.Int64
+
 	logger *zap.Logger
 }
 
-var _ = (logger.Logger)(&TelegramLogger{})
+var _ logger.Logger = (*TelegramLogger)(nil)
 
 // NewTelegramLogger creates a new TelegramLogger.
 func NewTelegramLogger(
-	logger *zap.Logger,
+	zapLogger *zap.Logger,
 	containerDetails *ContainerDetails,
 	opts ...TelegramLoggerOption,
 ) (*TelegramLogger, error) {
@@ -85,46 +114,43 @@ func NewTelegramLogger(
 		return nil, fmt.Errorf("failed to parse logger config: %w", err)
 	}
 
-	logger.Debug("parsed logger config", zap.Any("config", cfg))
-	logger.Debug("parsed container details", zap.Any("details", containerDetails))
-
 	formatter, err := newMessageFormatter(containerDetails, cfg.Attrs, cfg.Template)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create message formatter: %w", err)
 	}
 
-	client, err := NewClient(logger, cfg.ClientConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Telegram Client: %w", err)
-	}
-
-	bufferCapacity := defaultBufferCapacity
-	if cfg.MaxBufferSize <= 0 {
-		bufferCapacity = 0
-	}
-	buffer := make(chan string, bufferCapacity)
+	ctx, cancel := context.WithCancel(context.Background())
 
 	l := &TelegramLogger{
-		client:             client,
 		formatter:          formatter,
 		cfg:                cfg,
 		maxLogMessageChars: defaultLogMessageChars,
-		buffer:             buffer,
+		closeTimeout:       defaultCloseTimeout,
 		partialLogsBuffer:  newPartialLogBuffer(),
-		closed:             make(chan struct{}),
-		logger:             logger,
+		buffer:             make(chan string, cfg.BufferMessages),
+		stop:               make(chan struct{}),
+		done:               make(chan struct{}),
+		ctx:                ctx,
+		cancel:             cancel,
+		logger:             zapLogger,
 	}
 
 	for _, opt := range opts {
 		opt(l)
 	}
 
-	l.wg.Add(1)
-	runner := l.runImmediate
-	if cfg.BatchEnabled {
-		runner = l.runBatching
+	if l.limiters == nil {
+		l.limiters = newChatLimiters()
 	}
-	go runner()
+	limiter := l.limiters.get(cfg.ClientConfig.Token, cfg.ClientConfig.ChatID)
+
+	l.client, err = NewClient(zapLogger, cfg.ClientConfig, limiter)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create Telegram Client: %w", err)
+	}
+
+	go l.run()
 
 	return l, nil
 }
@@ -135,199 +161,241 @@ func (l *TelegramLogger) Name() string {
 }
 
 // Log implements the logger.Logger interface.
-func (l *TelegramLogger) Log(log *logger.Message) error {
-	if l.isClosed() {
-		return errLoggerClosed
-	}
-
-	if log.PLogMetaData != nil {
-		assembledLog, last := l.partialLogsBuffer.Append(log)
+// It does not change msg, because the caller passes msg to other loggers too.
+func (l *TelegramLogger) Log(msg *logger.Message) error {
+	if msg.PLogMetaData != nil {
+		assembledLog, last := l.partialLogsBuffer.Append(msg)
 		if !last {
 			return nil
 		}
-
-		*log = *assembledLog
+		msg = assembledLog
 	}
 
-	if l.cfg.FilterRegex != nil && !l.cfg.FilterRegex.Match(log.Line) {
+	if l.cfg.FilterRegex != nil && !l.cfg.FilterRegex.Match(msg.Line) {
 		l.logger.Debug("message is filtered out by regex", zap.String("regex", l.cfg.FilterRegex.String()))
 		return nil
 	}
 
-	text := l.formatter.Format(log)
-	// Split the message if it exceeds the maximum number of characters.
-	if utf8.RuneCountInString(text) > l.maxLogMessageChars {
-		runes := []rune(text)
-		for len(runes) > 0 {
-			end := min(len(runes), l.maxLogMessageChars)
-			slog := string(runes[:end])
-			runes = runes[end:]
-			if err := l.enqueue(slog); err != nil {
-				return err
-			}
-		}
+	// Telegram accepts only valid UTF-8 and rejects empty messages.
+	text := strings.ToValidUTF8(l.formatter.Format(msg), "�")
+	if strings.TrimSpace(text) == "" {
 		return nil
 	}
 
-	if err := l.enqueue(text); err != nil {
-		return err
+	return l.enqueue(truncate(text, l.maxLogMessageChars))
+}
+
+func (l *TelegramLogger) enqueue(text string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.closed {
+		return errLoggerClosed
 	}
+
+	select {
+	case l.buffer <- text:
+		return nil
+	default:
+	}
+
+	// The buffer is full. Drop the oldest message to keep the newest ones.
+	select {
+	case <-l.buffer:
+		l.dropped.Add(1)
+	default:
+	}
+
+	// Only enqueue writes to the buffer, and it holds l.mu,
+	// so the buffer has room for the message now.
+	l.buffer <- text
 
 	return nil
 }
 
-func (l *TelegramLogger) enqueue(log string) error {
-	if l.cfg.MaxBufferSize <= 0 {
-		l.buffer <- log // May block.
-		return nil
+// run sends the buffered messages until Close is called.
+func (l *TelegramLogger) run() {
+	defer close(l.done)
+
+	var flushTick <-chan time.Time
+	if l.cfg.BatchEnabled {
+		ticker := time.NewTicker(l.cfg.BatchFlushInterval)
+		defer ticker.Stop()
+		flushTick = ticker.C
 	}
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	select {
-	case l.buffer <- log:
-		return nil
-	case <-l.closed:
-		return errLoggerClosed
-	default:
-		// Buffer is full.
-		select {
-		case <-l.buffer:
-			// Drop the oldest message.
-		default:
-			// Buffer was empty.
-		}
-
-		// Try to enqueue the new message again.
-		select {
-		case l.buffer <- log:
-			return nil
-		case <-l.closed:
-			return errLoggerClosed
-		default:
-			return errors.New("failed to enqueue message after dropping oldest")
-		}
-	}
-}
-
-func (l *TelegramLogger) runImmediate() {
-	defer l.wg.Done()
-
-	drain := func() {
-		for log := range l.buffer {
-			l.send(log)
-		}
-	}
-	defer drain()
+	var b batch
 
 	for {
 		select {
-		case log, ok := <-l.buffer:
-			if !ok {
-				return
-			}
-			l.send(log)
-		case <-l.closed:
+		case text := <-l.buffer:
+			l.add(&b, text)
+		case <-flushTick:
+			l.flush(&b)
+		case <-l.stop:
+			// No new messages get into the buffer after Close,
+			// so send the messages that are left and exit.
+			l.drain(&b)
+			l.flush(&b)
+			l.reportDropped()
 			return
 		}
 	}
 }
 
-func (l *TelegramLogger) runBatching() {
-	defer l.wg.Done()
-
-	ticker := time.NewTicker(l.cfg.BatchFlushInterval)
-	defer ticker.Stop()
-
-	var (
-		batch          bytes.Buffer
-		batchRuneCount int
-	)
-
-	maxBytes := 4 * l.maxLogMessageChars // Unicode characters are up to 4 bytes
-	batch.Grow(maxBytes)
-
-	flush := func() {
-		if batch.Len() == 0 {
-			return
-		}
-
-		if batch.Bytes()[batch.Len()-1] == '\n' {
-			batch.Truncate(batch.Len() - 1)
-			batchRuneCount--
-		}
-
-		l.send(batch.String())
-
-		batch.Reset()
-		batchRuneCount = 0
-	}
-
-	add := func(log string) {
-		logLength := utf8.RuneCountInString(log) + 1
-
-		batch.WriteString(log)
-		batch.WriteByte('\n')
-		batchRuneCount += logLength
-
-		if batchRuneCount >= l.maxLogMessageChars {
-			flush()
-		}
-	}
-
-	drain := func() {
-		for log := range l.buffer {
-			add(log)
-		}
-	}
-	defer drain()
-	defer flush()
-
+// drain adds the messages that are left in the buffer to the batch.
+func (l *TelegramLogger) drain(b *batch) {
 	for {
 		select {
-		case log, ok := <-l.buffer:
-			if !ok {
-				return
-			}
-			add(log)
-		case <-ticker.C:
-			flush()
-		case <-l.closed:
+		case text := <-l.buffer:
+			l.add(b, text)
+		default:
 			return
 		}
 	}
 }
 
-func (l *TelegramLogger) send(log string) {
-	if err := l.client.SendMessage(log); err != nil {
+// batch joins messages with newlines into one Telegram message.
+type batch struct {
+	text  strings.Builder
+	len   int // The length of text as messageLen counts it.
+	lines int
+}
+
+// add adds a message to the batch. It sends the batch first if the message
+// does not fit into it, and sends the batch right away if batching is off.
+func (l *TelegramLogger) add(b *batch, text string) {
+	textLen := messageLen(text)
+
+	if b.lines > 0 && b.len+1+textLen > l.maxLogMessageChars {
+		l.flush(b)
+	}
+
+	if b.lines > 0 {
+		b.text.WriteByte('\n')
+		b.len++
+	}
+	b.text.WriteString(text)
+	b.len += textLen
+	b.lines++
+
+	// A newline and at least one character do not fit any more.
+	if !l.cfg.BatchEnabled || b.len+2 > l.maxLogMessageChars {
+		l.flush(b)
+	}
+}
+
+// flush sends the batch and makes it empty.
+func (l *TelegramLogger) flush(b *batch) {
+	if b.lines == 0 {
+		return
+	}
+
+	text, lines := b.text.String(), b.lines
+	b.text.Reset()
+	b.len = 0
+	b.lines = 0
+
+	if l.ctx.Err() != nil {
+		// The close timeout expired. Drop the batch without trying to send
+		// it; run reports all dropped messages once before it exits.
+		l.dropped.Add(int64(lines))
+		return
+	}
+
+	l.reportDropped()
+
+	if err := l.client.SendMessage(l.ctx, text); err != nil {
+		if l.ctx.Err() != nil {
+			// The close timeout expired.
+			l.dropped.Add(int64(lines))
+			return
+		}
 		l.logger.Error("failed to send log message", zap.Error(err))
 	}
 }
 
+// reportDropped logs how many messages were dropped since the last report.
+func (l *TelegramLogger) reportDropped() {
+	if n := l.dropped.Swap(0); n > 0 {
+		l.logger.Warn("dropped log messages", zap.Int64("count", n))
+	}
+}
+
 // Close implements the logger.Logger interface.
+// It sends the buffered messages, but waits for them for at most
+// closeTimeout. The messages that are not sent by then are dropped.
 func (l *TelegramLogger) Close() error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	if l.isClosed() {
+	if l.closed {
+		l.mu.Unlock()
 		return nil
 	}
-	close(l.closed)
-	close(l.buffer)
+	l.closed = true
+	l.mu.Unlock()
 
-	l.wg.Wait()
+	close(l.stop)
+
+	timer := time.NewTimer(l.closeTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-l.done:
+	case <-timer.C:
+		l.logger.Warn("timeout while sending buffered log messages, dropping the rest",
+			zap.Duration("timeout", l.closeTimeout),
+		)
+	}
+
+	// Stop the request in progress. Then run drops the rest and exits.
+	l.cancel()
+	<-l.done
 
 	return nil
 }
 
-func (l *TelegramLogger) isClosed() bool {
-	select {
-	case <-l.closed:
-		return true
-	default:
-		return false
+// messageLen returns the length of s as Telegram may count it.
+// Characters outside the Basic Multilingual Plane, such as most emoji,
+// count as two. This is safe whether Telegram counts characters or
+// UTF-16 code units.
+func messageLen(s string) int {
+	n := 0
+	for _, r := range s {
+		n += runeLen(r)
 	}
+	return n
+}
+
+func runeLen(r rune) int {
+	if r > 0xFFFF {
+		return 2
+	}
+	return 1
+}
+
+// truncate shortens text to at most maxLen as messageLen counts it,
+// and marks that the text was truncated.
+func truncate(text string, maxLen int) string {
+	if messageLen(text) <= maxLen {
+		return text
+	}
+
+	suffix := truncatedSuffix
+	limit := maxLen - messageLen(suffix)
+	if limit <= 0 {
+		suffix = ""
+		limit = maxLen
+	}
+
+	n := 0
+	for i, r := range text {
+		if n+runeLen(r) > limit {
+			return text[:i] + suffix
+		}
+		n += runeLen(r)
+	}
+
+	return text
 }
 
 // messageFormatter is a helper struct that formats log messages.
@@ -416,6 +484,8 @@ func newPartialLogBuffer() *partialLogBuffer {
 	}
 }
 
+// Append adds a part of a long line. When it gets the last part, it returns
+// the assembled line and true. The assembled line keeps at most maxLineBytes.
 func (b *partialLogBuffer) Append(log *logger.Message) (*logger.Message, bool) {
 	if log.PLogMetaData == nil {
 		panic("log must be partial")
@@ -435,7 +505,9 @@ func (b *partialLogBuffer) Append(log *logger.Message) (*logger.Message, bool) {
 		plog.PLogMetaData = nil
 	}
 
-	plog.Line = append(plog.Line, log.Line...)
+	if room := maxLineBytes - len(plog.Line); room > 0 {
+		plog.Line = append(plog.Line, log.Line[:min(room, len(log.Line))]...)
+	}
 
 	if log.PLogMetaData.Last {
 		delete(b.logs, log.PLogMetaData.ID)

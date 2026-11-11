@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/docker/docker/daemon/logger"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/go-plugins-helpers/sdk"
-	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
 
@@ -19,6 +19,10 @@ type driver interface {
 	StopLogging(streamPath string) error
 }
 
+// The JSON keys below are defined by the Docker log driver plugin protocol
+// and must stay in PascalCase.
+//
+//nolint:tagliatelle // Docker plugin protocol keys, not our naming.
 type (
 	logDriverStartLoggingRequest struct {
 		File string           `json:"File"`
@@ -67,7 +71,7 @@ func NewServer(zapLogger *zap.Logger, sdkHandler sdk.Handler, driver driver) *Se
 
 func (s *Server) Serve() error {
 	if err := s.sdkHandler.ServeUnix(driverName, 0); err != nil {
-		return errors.Wrap(err, "failed to serve unix socket")
+		return fmt.Errorf("failed to serve unix socket: %w", err)
 	}
 	return nil
 }
@@ -95,7 +99,13 @@ func (s *Server) startLoggingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.zapLogger.Debug("start logging request was called for the container", zap.Any("req", req))
+	// Do not log the whole request: its config has the bot token,
+	// and its container details have the container environment.
+	s.zapLogger.Debug("start logging request was called for the container",
+		zap.String("file", req.File),
+		zap.String("container_id", req.Info.ContainerID),
+		zap.String("container_name", req.Info.ContainerName),
+	)
 
 	s.writeResponse(w, http.StatusOK, nil)
 }
@@ -123,7 +133,7 @@ func (s *Server) stopLoggingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.zapLogger.Debug("stop logging request was called for the container", zap.Any("req", req))
+	s.zapLogger.Debug("stop logging request was called for the container", zap.String("file", req.File))
 
 	s.writeResponse(w, http.StatusOK, nil)
 }

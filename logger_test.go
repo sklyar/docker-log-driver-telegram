@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
-
-	"strings"
+	"unicode/utf8"
 
 	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/daemon/logger"
@@ -12,6 +16,8 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 var defaultContainerDetails = &ContainerDetails{
@@ -27,21 +33,64 @@ type mockClient struct {
 	mock.Mock
 }
 
-func (c *mockClient) SendMessage(message string) error {
+func (c *mockClient) SendMessage(_ context.Context, message string) error {
 	args := c.Called(message)
 	return args.Error(0)
 }
 
-func TestTelegramLogger_Log_NoBuffer(t *testing.T) {
+// recordingClient stores all sent messages.
+type recordingClient struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (c *recordingClient) SendMessage(_ context.Context, message string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.msgs = append(c.msgs, message)
+	return nil
+}
+
+func (c *recordingClient) messages() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return slices.Clone(c.msgs)
+}
+
+// blockingClient waits until the context is done.
+type blockingClient struct {
+	started chan struct{}
+}
+
+func (c *blockingClient) SendMessage(ctx context.Context, _ string) error {
+	select {
+	case c.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// droppedCount returns the sum of all reported dropped messages.
+func droppedCount(logs *observer.ObservedLogs) int64 {
+	var n int64
+	for _, entry := range logs.FilterMessage("dropped log messages").All() {
+		n += entry.ContextMap()["count"].(int64)
+	}
+	return n
+}
+
+func TestTelegramLogger_Log_BatchDisabled(t *testing.T) {
 	t.Parallel()
 
 	zapLogger := zap.NewNop()
 	containerDetails := *defaultContainerDetails
 	containerDetails.Config = map[string]string{
-		cfgTokenKey:         "token",
-		cfgChatIDKey:        "chat_id",
-		cfgBatchEnabledKey:  "false",
-		cfgMaxBufferSizeKey: "0",
+		cfgTokenKey:        "token",
+		cfgChatIDKey:       "chat_id",
+		cfgBatchEnabledKey: "false",
 	}
 
 	client := &mockClient{}
@@ -58,6 +107,10 @@ func TestTelegramLogger_Log_NoBuffer(t *testing.T) {
 
 	err = l.Log(&logger.Message{Line: []byte("message2")})
 	require.NoError(t, err)
+
+	require.NoError(t, l.Close())
+
+	client.AssertExpectations(t)
 }
 
 func TestTelegramLogger_Log_Buffer(t *testing.T) {
@@ -81,7 +134,7 @@ func TestTelegramLogger_Log_Buffer(t *testing.T) {
 	client := &mockClient{}
 	client.On("SendMessage", joinedLogs).
 		Return(nil).
-		Run(func(args mock.Arguments) {
+		Run(func(_ mock.Arguments) {
 			sent <- struct{}{}
 		})
 	client.On("SendMessage", logs[4]).
@@ -97,7 +150,7 @@ func TestTelegramLogger_Log_Buffer(t *testing.T) {
 		assert.NoError(t, err)
 	}
 
-	waitWithTimeout(t, sent, 3*time.Second, "timeout waiting for the message to be sent")
+	waitWithTimeout(t, sent, "timeout waiting for the message to be sent")
 
 	err = l.Close()
 	require.NoError(t, err)
@@ -131,8 +184,6 @@ func TestTelegramLogger_Log_Buffer_Drain(t *testing.T) {
 	for _, message := range logs {
 		err = l.Log(&logger.Message{Line: []byte(message)})
 		assert.NoError(t, err)
-
-		time.Sleep(20 * time.Millisecond)
 	}
 
 	err = l.Close()
@@ -141,10 +192,54 @@ func TestTelegramLogger_Log_Buffer_Drain(t *testing.T) {
 	client.AssertExpectations(t)
 }
 
-func TestTelegramLogger_Log_Buffer_Overflow(t *testing.T) {
+func TestTelegramLogger_Log_Buffer_BatchLimit(t *testing.T) {
 	t.Parallel()
 
-	zapLogger := zap.NewNop()
+	containerDetails := *defaultContainerDetails
+	containerDetails.Config = map[string]string{
+		cfgTokenKey:              "token",
+		cfgChatIDKey:             "chat_id",
+		cfgBatchEnabledKey:       "true",
+		cfgBatchFlushIntervalKey: "1s",
+	}
+
+	const maxChars = 10
+
+	// The lengths are chosen so that some batches are exactly maxChars long
+	// and some lines do not fit into the current batch.
+	lines := []string{"aaaa", "ббб", "cc", "ddddddd", "eeeeeeeeee", "f", "gggggggg", "hh"}
+
+	client := &recordingClient{}
+
+	l, err := NewTelegramLogger(zap.NewNop(), &containerDetails, WithMaxLogMessageChars(maxChars))
+	require.NoError(t, err)
+
+	l.client = client
+
+	for _, line := range lines {
+		require.NoError(t, l.Log(&logger.Message{Line: []byte(line)}))
+	}
+
+	sentLines := func() []string {
+		return strings.Split(strings.Join(client.messages(), "\n"), "\n")
+	}
+
+	// The last batch is sent by the flush ticker.
+	require.Eventually(t, func() bool {
+		return len(sentLines()) >= len(lines)
+	}, 3*time.Second, 10*time.Millisecond)
+
+	for _, msg := range client.messages() {
+		assert.LessOrEqual(t, utf8.RuneCountInString(msg), maxChars, "message %q is too long", msg)
+	}
+	assert.Equal(t, lines, sentLines())
+
+	require.NoError(t, l.Close())
+}
+
+func TestTelegramLogger_Close_SendsBufferedLines(t *testing.T) {
+	t.Parallel()
+
 	containerDetails := *defaultContainerDetails
 	containerDetails.Config = map[string]string{
 		cfgTokenKey:              "token",
@@ -153,13 +248,45 @@ func TestTelegramLogger_Log_Buffer_Overflow(t *testing.T) {
 		cfgBatchFlushIntervalKey: "1m",
 	}
 
+	lines := []string{"line1", "line2", "line3", "line4", "line5"}
+
+	client := &recordingClient{}
+
+	l, err := NewTelegramLogger(zap.NewNop(), &containerDetails)
+	require.NoError(t, err)
+
+	l.client = client
+
+	// Close right after logging, so some lines are still in the buffer.
+	for _, line := range lines {
+		require.NoError(t, l.Log(&logger.Message{Line: []byte(line)}))
+	}
+	require.NoError(t, l.Close())
+
+	assert.Equal(t, strings.Join(lines, "\n"), strings.Join(client.messages(), "\n"))
+}
+
+func TestTelegramLogger_Log_Buffer_Overflow(t *testing.T) {
+	t.Parallel()
+
+	core, observedLogs := observer.New(zapcore.WarnLevel)
+	zapLogger := zap.New(core)
+	containerDetails := *defaultContainerDetails
+	containerDetails.Config = map[string]string{
+		cfgTokenKey:              "token",
+		cfgChatIDKey:             "chat_id",
+		cfgBatchEnabledKey:       "true",
+		cfgBatchFlushIntervalKey: "1m",
+		cfgBufferMessagesKey:     "2",
+	}
+
 	client := &mockClient{}
 
 	// This blocks the message processing to test buffer overflow behavior.
 	sent1 := make(chan struct{})
 	client.On("SendMessage", "0000").
 		Return(nil).
-		Run(func(args mock.Arguments) {
+		Run(func(_ mock.Arguments) {
 			// Notify that message processing has started
 			sent1 <- struct{}{}
 
@@ -173,14 +300,13 @@ func TestTelegramLogger_Log_Buffer_Overflow(t *testing.T) {
 	sent2 := make(chan struct{})
 	client.On("SendMessage", "2\n3").
 		Return(nil).
-		Run(func(args mock.Arguments) {
+		Run(func(_ mock.Arguments) {
 			sent2 <- struct{}{}
 		})
 
 	l, err := NewTelegramLogger(
 		zapLogger,
 		&containerDetails,
-		WithBufferCapacity(2),
 		WithMaxLogMessageChars(4),
 	)
 	require.NoError(t, err)
@@ -207,44 +333,130 @@ func TestTelegramLogger_Log_Buffer_Overflow(t *testing.T) {
 	// This allows the batched messages to be processed
 	sent1 <- struct{}{}
 
-	waitWithTimeout(t, sent2, 3*time.Second, "timeout waiting for the second message to be sent")
+	waitWithTimeout(t, sent2, "timeout waiting for the second message to be sent")
 
 	client.AssertExpectations(t)
+	assert.Equal(t, int64(1), droppedCount(observedLogs))
 }
 
 func TestTelegramLoggerLog_Truncate(t *testing.T) {
 	t.Parallel()
 
-	zapLogger := zap.NewNop()
 	containerDetails := *defaultContainerDetails
 	containerDetails.Config = map[string]string{
-		cfgTokenKey:         "token",
-		cfgChatIDKey:        "chat_id",
-		cfgBatchEnabledKey:  "false",
-		cfgMaxBufferSizeKey: "0",
+		cfgTokenKey:        "token",
+		cfgChatIDKey:       "chat_id",
+		cfgBatchEnabledKey: "false",
 	}
 
 	longMessage := strings.Repeat("a", defaultLogMessageChars+1)
+	want := longMessage[:defaultLogMessageChars-messageLen(truncatedSuffix)] + truncatedSuffix
 
-	client := &mockClient{}
-	client.On("SendMessage", longMessage[:defaultLogMessageChars]).Return(nil)
-	client.On("SendMessage", longMessage[defaultLogMessageChars:]).Return(nil)
+	client := &recordingClient{}
 
-	formatter, err := newMessageFormatter(defaultContainerDetails, nil, "{log}")
-	assert.NoError(t, err)
-
-	l, err := NewTelegramLogger(zapLogger, &containerDetails)
+	l, err := NewTelegramLogger(zap.NewNop(), &containerDetails)
 	require.NoError(t, err)
 
 	l.client = client
-	l.formatter = formatter
 
-	err = l.Log(&logger.Message{Line: []byte(longMessage)})
-	require.NoError(t, err)
-
+	require.NoError(t, l.Log(&logger.Message{Line: []byte(longMessage)}))
 	require.NoError(t, l.Close())
 
-	client.AssertExpectations(t)
+	assert.Equal(t, []string{want}, client.messages())
+	assert.Equal(t, defaultLogMessageChars, messageLen(want))
+}
+
+func TestTelegramLoggerLog_InvalidUTF8AndEmptyLines(t *testing.T) {
+	t.Parallel()
+
+	containerDetails := *defaultContainerDetails
+	containerDetails.Config = map[string]string{
+		cfgTokenKey:        "token",
+		cfgChatIDKey:       "chat_id",
+		cfgBatchEnabledKey: "false",
+	}
+
+	client := &recordingClient{}
+
+	l, err := NewTelegramLogger(zap.NewNop(), &containerDetails)
+	require.NoError(t, err)
+
+	l.client = client
+
+	for _, line := range []string{"", "  \t", "\xff\xfeabc"} {
+		require.NoError(t, l.Log(&logger.Message{Line: []byte(line)}))
+	}
+	require.NoError(t, l.Close())
+
+	assert.Equal(t, []string{"\uFFFDabc"}, client.messages())
+}
+
+func TestTelegramLogger_Close_Timeout(t *testing.T) {
+	t.Parallel()
+
+	core, observedLogs := observer.New(zapcore.WarnLevel)
+	containerDetails := *defaultContainerDetails
+	containerDetails.Config = map[string]string{
+		cfgTokenKey:        "token",
+		cfgChatIDKey:       "chat_id",
+		cfgBatchEnabledKey: "false",
+	}
+
+	client := &blockingClient{started: make(chan struct{}, 1)}
+
+	l, err := NewTelegramLogger(zap.New(core), &containerDetails)
+	require.NoError(t, err)
+
+	l.client = client
+	l.closeTimeout = 50 * time.Millisecond
+
+	for _, line := range []string{"line1", "line2", "line3"} {
+		require.NoError(t, l.Log(&logger.Message{Line: []byte(line)}))
+	}
+	waitWithTimeout(t, client.started, "timeout waiting for the first send")
+
+	start := time.Now()
+	require.NoError(t, l.Close())
+
+	assert.Less(t, time.Since(start), 3*time.Second)
+	assert.Equal(t, int64(3), droppedCount(observedLogs))
+	assert.Len(t, observedLogs.FilterMessage("dropped log messages").All(), 1, "the drops on close must be reported once")
+	assert.ErrorIs(t, l.Log(&logger.Message{Line: []byte("late")}), errLoggerClosed)
+}
+
+func TestTelegramLogger_LogDuringClose(t *testing.T) {
+	t.Parallel()
+
+	containerDetails := *defaultContainerDetails
+	containerDetails.Config = map[string]string{
+		cfgTokenKey:              "token",
+		cfgChatIDKey:             "chat_id",
+		cfgBatchFlushIntervalKey: "1m",
+		cfgBufferMessagesKey:     "10",
+	}
+
+	for range 20 {
+		l, err := NewTelegramLogger(zap.NewNop(), &containerDetails)
+		require.NoError(t, err)
+
+		l.client = &recordingClient{}
+
+		var wg sync.WaitGroup
+		for i := range 4 {
+			wg.Go(func() {
+				for j := range 100 {
+					err := l.Log(&logger.Message{Line: []byte(fmt.Sprintf("%d-%d", i, j))})
+					if err != nil {
+						assert.ErrorIs(t, err, errLoggerClosed)
+						return
+					}
+				}
+			})
+		}
+
+		require.NoError(t, l.Close())
+		wg.Wait()
+	}
 }
 
 func TestTelegramLoggerLog_PartialLog(t *testing.T) {
@@ -276,17 +488,16 @@ func TestTelegramLoggerLog_PartialLog(t *testing.T) {
 	client := &mockClient{}
 	client.On("SendMessage", string(assembledLog.Line)).
 		Return(nil).
-		Run(func(args mock.Arguments) {
+		Run(func(_ mock.Arguments) {
 			sent <- struct{}{}
 		})
 
 	zapLogger := zap.NewNop()
 	containerDetails := *defaultContainerDetails
 	containerDetails.Config = map[string]string{
-		cfgTokenKey:         "token",
-		cfgChatIDKey:        "chat_id",
-		cfgBatchEnabledKey:  "false",
-		cfgMaxBufferSizeKey: "0",
+		cfgTokenKey:        "token",
+		cfgChatIDKey:       "chat_id",
+		cfgBatchEnabledKey: "false",
 	}
 
 	l, err := NewTelegramLogger(zapLogger, &containerDetails)
@@ -299,9 +510,14 @@ func TestTelegramLoggerLog_PartialLog(t *testing.T) {
 	assert.NoError(t, l.Log(log2))
 	assert.NoError(t, l.Log(log3))
 
-	waitWithTimeout(t, sent, 3*time.Second, "timeout waiting for the message to be sent")
+	waitWithTimeout(t, sent, "timeout waiting for the message to be sent")
 
 	client.AssertExpectations(t)
+
+	// The driver passes the same message to the json-file logger,
+	// so Log must not change it.
+	assert.Equal(t, "3", string(log3.Line))
+	assert.Equal(t, &backend.PartialLogMetaData{ID: "group_id", Last: true}, log3.PLogMetaData)
 }
 
 func TestMessageFormatter(t *testing.T) {
@@ -433,6 +649,51 @@ func TestPartialLogBuffer(t *testing.T) {
 	require.Nil(t, log)
 }
 
+func TestPartialLogBuffer_LimitsLineSize(t *testing.T) {
+	t.Parallel()
+
+	b := newPartialLogBuffer()
+	chunk := []byte(strings.Repeat("a", 16*1024))
+
+	for range 10 {
+		log, last := b.Append(&logger.Message{Line: chunk, PLogMetaData: &backend.PartialLogMetaData{ID: "id"}})
+		require.False(t, last)
+		require.Nil(t, log)
+	}
+
+	log, last := b.Append(&logger.Message{Line: chunk, PLogMetaData: &backend.PartialLogMetaData{ID: "id", Last: true}})
+	require.True(t, last)
+	assert.Len(t, log.Line, maxLineBytes)
+}
+
+func TestTruncate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		text   string
+		maxLen int
+		want   string
+	}{
+		{"short", "abc", 20, "abc"},
+		{"exact", strings.Repeat("a", 20), 20, strings.Repeat("a", 20)},
+		{"long", strings.Repeat("a", 21), 20, strings.Repeat("a", 7) + truncatedSuffix},
+		{"multibyte", strings.Repeat("ж", 21), 20, strings.Repeat("ж", 7) + truncatedSuffix},
+		{"emoji counts as two", strings.Repeat("😀", 11), 20, strings.Repeat("😀", 3) + truncatedSuffix},
+		{"no room for the suffix", "abcdef", 4, "abcd"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := truncate(tt.text, tt.maxLen)
+			assert.Equal(t, tt.want, got)
+			assert.LessOrEqual(t, messageLen(got), tt.maxLen)
+		})
+	}
+}
+
 func generateLogs(count, size int) []string {
 	logs := make([]string, count)
 	for i := range count {
@@ -441,12 +702,13 @@ func generateLogs(count, size int) []string {
 	return logs
 }
 
-func waitWithTimeout(t *testing.T, done chan struct{}, timeout time.Duration, args ...any) {
+// waitWithTimeout waits for done for at most 3 seconds.
+func waitWithTimeout(t *testing.T, done chan struct{}, args ...any) {
 	t.Helper()
 
 	select {
 	case <-done:
-	case <-time.After(timeout):
+	case <-time.After(3 * time.Second):
 		t.Fatal(args...)
 	}
 }

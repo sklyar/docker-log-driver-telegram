@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/containerd/fifo"
@@ -18,6 +21,20 @@ import (
 	"github.com/docker/docker/daemon/logger/jsonfilelog"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
+)
+
+const (
+	// drainTimeout limits how long Close waits until the driver reads
+	// the logs that Docker has already written to the fifo.
+	drainTimeout = 5 * time.Second
+
+	// drainPollInterval is how often Close checks if the fifo is empty.
+	drainPollInterval = 10 * time.Millisecond
+
+	// processLogsTimeout limits how long Close waits for processLogs to
+	// stop after the fifo is closed. On Linux, closing the fifo stops
+	// a blocked read at once.
+	processLogsTimeout = time.Second
 )
 
 type telegramLogger interface {
@@ -41,12 +58,15 @@ type Driver struct {
 }
 
 func NewDriver(zapLogger *zap.Logger) *Driver {
+	// Containers that send logs to the same chat share one rate limiter.
+	limiters := newChatLimiters()
+
 	driver := &Driver{
 		streams:          make(map[string]*logStream),
 		containerStreams: make(map[string]*logStream),
 		fs:               osFS{},
 		newTelegramLogger: func(logger *zap.Logger, details *ContainerDetails) (telegramLogger, error) {
-			l, err := NewTelegramLogger(logger, details)
+			l, err := NewTelegramLogger(logger, details, WithChatLimiters(limiters))
 			if err != nil {
 				return nil, err
 			}
@@ -62,16 +82,41 @@ func NewDriver(zapLogger *zap.Logger) *Driver {
 	return driver
 }
 
-func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDetails) (stream *logStream, err error) {
-	d.mu.RLock()
-	if _, ok := d.streams[streamPath]; ok {
-		d.mu.RUnlock()
+func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDetails) (*logStream, error) {
+	// Hold the lock for the whole start. Otherwise two starts for the same
+	// container could use the same log folder, and the start that fails
+	// would remove the folder of the other one.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if _, exists := d.streams[streamPath]; exists {
 		return nil, errors.New("already logging")
 	}
-	d.mu.RUnlock()
+	if _, exists := d.containerStreams[containerDetails.ContainerID]; exists {
+		return nil, errors.New("already logging for container")
+	}
 
+	stream, err := d.newStream(streamPath, containerDetails)
+	if err != nil {
+		return nil, err
+	}
+
+	d.streams[streamPath] = stream
+	d.containerStreams[containerDetails.ContainerID] = stream
+
+	stream.done = make(chan struct{})
+	go func() {
+		defer close(stream.done)
+		d.processLogs(stream)
+	}()
+
+	return stream, nil
+}
+
+// newStream creates the loggers and opens the fifo for a new stream.
+func (d *Driver) newStream(streamPath string, containerDetails *ContainerDetails) (_ *logStream, err error) {
 	name := "container:" + containerDetails.ContainerName
-	stream = &logStream{
+	stream := &logStream{
 		streamPath:       streamPath,
 		containerDetails: containerDetails,
 		logger:           d.zapLogger.Named(name),
@@ -79,17 +124,14 @@ func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDeta
 		stop:             make(chan struct{}),
 	}
 
-	defer func(stream *logStream) {
-		if err == nil || stream == nil {
+	defer func() {
+		if err == nil {
 			return
 		}
-
-		if err := stream.Close(); err != nil {
-			d.zapLogger.Error("failed to close stream", zap.Error(err))
+		if closeErr := stream.Close(); closeErr != nil {
+			d.zapLogger.Error("failed to close stream", zap.Error(closeErr))
 		}
-
-		stream = nil
-	}(stream)
+	}()
 
 	noFile, err := parseBool(containerDetails.Config[cfgNoFileKey], false)
 	if err != nil {
@@ -101,10 +143,11 @@ func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDeta
 	}
 
 	if !noFile {
-		folder := filepath.Join(d.fs.BasePath(), "/var/log/docker", containerDetails.ContainerID)
-		if err := d.fs.MkdirAll(folder, 0755); err != nil {
+		folder := filepath.Join(d.fs.BasePath(), "var", "log", "docker", containerDetails.ContainerID)
+		if err := d.fs.MkdirAll(folder, 0o755); err != nil {
 			return nil, fmt.Errorf("failed to create folder: %w", err)
 		}
+		stream.folder = folder
 
 		stream.jsonLogger, err = newJSONLogger(containerDetails, folder)
 		if err != nil {
@@ -117,25 +160,10 @@ func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDeta
 		return nil, fmt.Errorf("failed to create telegram logger: %w", err)
 	}
 
-	stream.logFifo, err = fifo.OpenFifo(context.Background(), streamPath, unix.O_RDWR|unix.O_CREAT|unix.O_NONBLOCK, 0700)
+	stream.logFifo, err = fifo.OpenFifo(context.Background(), streamPath, unix.O_RDWR|unix.O_CREAT|unix.O_NONBLOCK, 0o700)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open fifo: %w", err)
 	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if _, exists := d.streams[streamPath]; exists {
-		return nil, errors.New("already logging")
-	}
-	if _, exists := d.containerStreams[containerDetails.ContainerID]; exists {
-		return nil, errors.New("already logging for container")
-	}
-
-	d.streams[streamPath] = stream
-	d.containerStreams[containerDetails.ContainerID] = stream
-
-	go d.processLogs(stream)
 
 	return stream, nil
 }
@@ -143,21 +171,12 @@ func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDeta
 // defaultProcessLogs reads logs from fifo file and forwards them to the loggers.
 // The optional 'processedNotifier' channel is used exclusively for testing purposes to signal
 // when a log entry has been processed. It can be left as 'nil' for non-testing use cases.
+//
+// It runs until the fifo is closed. It passes every entry that it has read
+// to the loggers: logStream.Close closes the loggers only after it stops.
 func (d *Driver) defaultProcessLogs(stream *logStream, processedNotifier chan<- struct{}) {
-	defer func() {
-		if err := stream.Close(); err != nil {
-			d.zapLogger.Error("failed to close stream", zap.Error(err))
-		}
-	}()
-
 	logs := NewLogs(stream)
 	for logs.Next() {
-		select {
-		case <-stream.stop:
-			return
-		default:
-		}
-
 		entry := logs.Log()
 
 		var partialLog *backend.PartialLogMetaData
@@ -175,13 +194,6 @@ func (d *Driver) defaultProcessLogs(stream *logStream, processedNotifier chan<- 
 			Timestamp:    time.Unix(0, entry.GetTimeNano()),
 			PLogMetaData: partialLog,
 		}
-
-		stream.logger.Debug(
-			"message",
-			zap.String("line", string(log.Line)),
-			zap.String("source", log.Source),
-			zap.Time("timestamp", log.Timestamp),
-		)
 
 		if err := stream.telegramLogger.Log(log); err != nil {
 			stream.logger.Error("failed to log to telegram logger", zap.Error(err))
@@ -202,6 +214,12 @@ func (d *Driver) defaultProcessLogs(stream *logStream, processedNotifier chan<- 
 
 	if err := logs.Err(); err != nil {
 		stream.logger.Error("failed to read logs", zap.Error(err))
+
+		// Nobody reads the fifo any more. Close it, so that Docker gets
+		// an error instead of being blocked on writing to a full fifo.
+		if err := stream.closeFifo(); err != nil {
+			stream.logger.Error("failed to close fifo", zap.Error(err))
+		}
 	}
 }
 
@@ -236,13 +254,17 @@ func (d *Driver) ReadLogs(ctx context.Context, containerID string, readConfig *R
 	return r, nil
 }
 
+// StopLogging stops the stream. A stream that the driver does not know is
+// already stopped: for example, Docker stops the streams of the previous
+// plugin process after the plugin restarts.
 func (d *Driver) StopLogging(streamPath string) error {
 	d.mu.Lock()
 
 	stream, exists := d.streams[streamPath]
 	if !exists {
 		d.mu.Unlock()
-		return errors.New("not logging")
+		d.zapLogger.Info("the stream is already stopped", zap.String("stream_path", streamPath))
+		return nil
 	}
 
 	delete(d.streams, streamPath)
@@ -255,6 +277,25 @@ func (d *Driver) StopLogging(streamPath string) error {
 	}
 
 	return nil
+}
+
+// Close stops all streams. The plugin calls it when it shuts down.
+func (d *Driver) Close() {
+	d.mu.Lock()
+	streams := slices.Collect(maps.Values(d.streams))
+	clear(d.streams)
+	clear(d.containerStreams)
+	d.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, stream := range streams {
+		wg.Go(func() {
+			if err := stream.Close(); err != nil {
+				d.zapLogger.Error("failed to close stream", zap.Error(err))
+			}
+		})
+	}
+	wg.Wait()
 }
 
 // logReader is a wrapper around json-file logger that reads logs
@@ -290,7 +331,7 @@ func (r *logReader) ReadLogs(ctx context.Context) {
 			}
 
 			buf.Line = msg.Line
-			buf.Partial = msg.PLogMetaData != nil && msg.PLogMetaData.Last
+			buf.Partial = msg.PLogMetaData != nil // The same as Docker sets it.
 			buf.Source = msg.Source
 			buf.TimeNano = msg.Timestamp.UnixNano()
 
@@ -320,36 +361,54 @@ type logStream struct {
 	telegramLogger telegramLogger
 	jsonLogger     logger.Logger
 
+	// folder is the folder that the plugin created for the json log file.
+	folder   string
 	keepFile bool
 
 	logger *zap.Logger
 	fs     fileSystem
 
-	stop       chan struct{}
-	closedOnce sync.Once
+	// stop is closed when the stream closes. It stops the log readers.
+	stop chan struct{}
+
+	// done is closed when processLogs exits. It is nil if processLogs
+	// was not started.
+	done chan struct{}
+
+	fifoCloseOnce sync.Once
+	closedOnce    sync.Once
 }
 
 // Close closes the stream.
+//
+// Docker calls StopLogging right after it writes the last logs to the fifo,
+// so the fifo can still have logs that the driver has not read. Close waits
+// until the driver reads them and passes them to the loggers, and only then
+// closes the loggers.
 func (s *logStream) Close() error {
 	var err error
 
 	s.closedOnce.Do(func() {
+		s.waitFifoDrained()
+
 		close(s.stop)
 
 		var errs []error
 
-		if s.logFifo != nil {
-			if err := s.logFifo.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("failed to close stream: %w", err))
-			}
+		if err := s.closeFifo(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close stream: %w", err))
 		}
 
-		if s.jsonLogger != nil && !s.keepFile {
+		s.waitProcessLogs()
+
+		if s.jsonLogger != nil {
 			if err := s.jsonLogger.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("failed to close json logger: %w", err))
 			}
-			folder := filepath.Dir(s.containerDetails.LogPath)
-			if err := s.fs.RemoveAll(folder); err != nil {
+		}
+
+		if s.folder != "" && !s.keepFile {
+			if err := s.fs.RemoveAll(s.folder); err != nil {
 				errs = append(errs, fmt.Errorf("failed to remove log dir: %w", err))
 			}
 		}
@@ -366,10 +425,80 @@ func (s *logStream) Close() error {
 	return err
 }
 
+func (s *logStream) closeFifo() error {
+	var err error
+	s.fifoCloseOnce.Do(func() {
+		if s.logFifo != nil {
+			err = s.logFifo.Close()
+		}
+	})
+	return err
+}
+
+// waitFifoDrained waits until processLogs reads all data from the fifo.
+// It stops waiting when processLogs exits or drainTimeout expires.
+func (s *logStream) waitFifoDrained() {
+	if s.done == nil {
+		return
+	}
+
+	conn, ok := s.logFifo.(syscall.Conn)
+	if !ok {
+		return
+	}
+	rawConn, err := conn.SyscallConn()
+	if err != nil {
+		return
+	}
+
+	timeout := time.NewTimer(drainTimeout)
+	defer timeout.Stop()
+
+	ticker := time.NewTicker(drainPollInterval)
+	defer ticker.Stop()
+
+	for hasDataToRead(rawConn) {
+		select {
+		case <-s.done:
+			return
+		case <-timeout.C:
+			s.logger.Warn("timeout while reading the rest of the logs from the fifo")
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// hasDataToRead reports whether the file has data to read.
+func hasDataToRead(rawConn syscall.RawConn) bool {
+	var ready bool
+	err := rawConn.Control(func(fd uintptr) {
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}} //nolint:gosec // File descriptors fit into int32.
+		n, err := unix.Poll(fds, 0)
+		ready = err == nil && n > 0 && fds[0].Revents&unix.POLLIN != 0
+	})
+	return err == nil && ready
+}
+
+// waitProcessLogs waits until processLogs exits after the fifo is closed.
+func (s *logStream) waitProcessLogs() {
+	if s.done == nil {
+		return
+	}
+
+	timer := time.NewTimer(processLogsTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-s.done:
+	case <-timer.C:
+		s.logger.Warn("timeout while waiting for the log reader to stop")
+	}
+}
+
 // Logs represents an iterator for reading logs using logdriver.LogEntryDecoder.
 type Logs struct {
 	decoder logdriver.LogEntryDecoder
-	stream  *logStream
 
 	current logdriver.LogEntry
 
@@ -381,7 +510,6 @@ type Logs struct {
 func NewLogs(stream *logStream) *Logs {
 	return &Logs{
 		decoder: logdriver.NewLogEntryDecoder(stream.logFifo),
-		stream:  stream,
 	}
 }
 
@@ -416,18 +544,12 @@ func (l *Logs) Err() error {
 	return l.lastErr
 }
 
-// Close closes the Logs iterator and the underlying log stream.
-func (l *Logs) Close() error {
-	l.closed = true
-	return l.stream.Close()
-}
-
 type osFS struct{}
 
 var _ fileSystem = (*osFS)(nil)
 
 func (osFS) BasePath() string {
-	return ""
+	return "/"
 }
 
 func (osFS) MkdirAll(path string, perm os.FileMode) error {

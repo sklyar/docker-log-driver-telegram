@@ -98,23 +98,39 @@ Restart Docker after changes: `systemctl restart docker`
 
 ## Options
 
-| Option               | Required | Default                  | Description                                                                                  |
-|----------------------|----------|--------------------------|----------------------------------------------------------------------------------------------|
-| url                  | No       | https://api.telegram.org | Telegram API URL                                                                             |
-| token                | Yes      |                          | Bot API token                                                                                |
-| chat_id              | Yes      |                          | Target chat ID                                                                               |
-| template             | No       | {log}                    | Message format template                                                                      |
-| filter-regex         | No       |                          | Regex to filter logs                                                                         |
-| retries              | No       | 5                        | Retry attempts after the initial request (0 = no retries)                                    |
-| timeout              | No       | 10s                      | API request timeout (units: ns, us/µs, ms, s, m, h)                                          |
-| no-file              | No       | false                    | Disable log files (disables `docker logs`)                                                   |
-| keep-file            | No       | false                    | Keep log files after container stop                                                          |
-| mode                 | No       | blocking                 | Log processing mode: `blocking`/`non-blocking`                                               |
-| max-buffer-size      | No       | 1000000                  | Max buffer size (Example values: 32, 32b, 32B, 32k, 32K, 32kb, 32Kb, 32Mb, 32Gb, 32Tb, 32Pb) |
-| batch-enabled        | No       | true                     | Enable batch sending                                                                         |
-| batch-flush-interval | No       | 3s                       | Batch flush interval (units: ns, us/µs, ms, s, m, h)                                         |
+| Option               | Required | Default                  | Description                                                                     |
+|----------------------|----------|--------------------------|---------------------------------------------------------------------------------|
+| url                  | No       | https://api.telegram.org | Telegram API URL (`http` or `https`); a path such as `/telegram` is kept        |
+| token                | Yes      |                          | Bot API token                                                                   |
+| chat_id              | Yes      |                          | Target chat ID                                                                  |
+| template             | No       | {log}                    | Message format template                                                         |
+| filter-regex         | No       |                          | Regex to filter logs                                                            |
+| retries              | No       | 5                        | Retry attempts after the initial request (0 = no retries)                       |
+| timeout              | No       | 10s                      | Timeout of one API request, must be positive (units: ns, us/µs, ms, s, m, h)    |
+| no-file              | No       | false                    | Disable log files (disables `docker logs`)                                      |
+| keep-file            | No       | false                    | Keep log files after container stop                                             |
+| buffer-messages      | No       | 10000                    | Number of messages that wait to be sent; when it is full, the oldest is dropped |
+| batch-enabled        | No       | true                     | Enable batch sending                                                            |
+| batch-flush-interval | No       | 3s                       | Batch flush interval, at least 1s (units: ns, us/µs, ms, s, m, h)               |
 
-`filter-regex` sends only log messages that match the regex.
+`filter-regex` sends only log messages that match the regex. For a very long line, the regex is matched against the
+first 64 KiB.
+
+The Docker options `mode` and `max-buffer-size` are also accepted. Docker uses them itself: with `mode=non-blocking`,
+Docker keeps up to `max-buffer-size` of logs in its own buffer before it passes them to the driver.
+
+### Delivery
+
+- A message longer than the Telegram limit of 4096 characters is truncated and ends with `… (truncated)`.
+- With batching, the driver joins log lines into one message up to the Telegram limit.
+- Telegram allows about 20 messages per minute to one group. All containers that use the same bot and chat share this
+  limit.
+- Failed requests are retried: network errors, bad responses and server errors after a growing delay (1s, 2s, 4s, …,
+  up to 30s), and rate limit errors after the delay that Telegram returns.
+- When the buffer is full, the driver drops the oldest messages and writes the number of dropped messages to the
+  plugin log.
+- When a container stops, the driver first reads the logs that Docker has already passed to it (for at most 5
+  seconds), then sends the buffered messages for at most 15 seconds and drops the rest.
 
 ### Template Tags
 
