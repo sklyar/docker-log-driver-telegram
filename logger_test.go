@@ -1,10 +1,9 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
-
-	"strings"
 
 	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/daemon/logger"
@@ -81,7 +80,7 @@ func TestTelegramLogger_Log_Buffer(t *testing.T) {
 	client := &mockClient{}
 	client.On("SendMessage", joinedLogs).
 		Return(nil).
-		Run(func(args mock.Arguments) {
+		Run(func(_ mock.Arguments) {
 			sent <- struct{}{}
 		})
 	client.On("SendMessage", logs[4]).
@@ -159,7 +158,7 @@ func TestTelegramLogger_Log_Buffer_Overflow(t *testing.T) {
 	sent1 := make(chan struct{})
 	client.On("SendMessage", "0000").
 		Return(nil).
-		Run(func(args mock.Arguments) {
+		Run(func(_ mock.Arguments) {
 			// Notify that message processing has started
 			sent1 <- struct{}{}
 
@@ -173,7 +172,7 @@ func TestTelegramLogger_Log_Buffer_Overflow(t *testing.T) {
 	sent2 := make(chan struct{})
 	client.On("SendMessage", "2\n3").
 		Return(nil).
-		Run(func(args mock.Arguments) {
+		Run(func(_ mock.Arguments) {
 			sent2 <- struct{}{}
 		})
 
@@ -276,7 +275,7 @@ func TestTelegramLoggerLog_PartialLog(t *testing.T) {
 	client := &mockClient{}
 	client.On("SendMessage", string(assembledLog.Line)).
 		Return(nil).
-		Run(func(args mock.Arguments) {
+		Run(func(_ mock.Arguments) {
 			sent <- struct{}{}
 		})
 

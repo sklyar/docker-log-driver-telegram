@@ -19,6 +19,10 @@ type driver interface {
 	StopLogging(streamPath string) error
 }
 
+// The JSON keys below are defined by the Docker log driver plugin protocol
+// and must stay in PascalCase.
+//
+//nolint:tagliatelle // Docker plugin protocol keys, not our naming.
 type (
 	logDriverStartLoggingRequest struct {
 		File string           `json:"File"`

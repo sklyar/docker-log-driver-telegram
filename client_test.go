@@ -94,7 +94,7 @@ func TestSendMessage(t *testing.T) {
 		t.Parallel()
 
 		attempts := 0
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			attempts++
 
 			if attempts <= 2 {
@@ -146,7 +146,7 @@ func TestSendMessage(t *testing.T) {
 		t.Parallel()
 
 		calls := 0
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			calls++
 
 			w.Header().Set("Content-Type", "application/json")
@@ -185,7 +185,6 @@ func TestSendMessage(t *testing.T) {
 		assert.Equal(t, 4, cfg.Retries+1)
 		assert.Equal(t, 3*time.Second, sleepTime)
 	})
-
 }
 
 func TestPing(t *testing.T) {
@@ -269,7 +268,7 @@ func TestPing(t *testing.T) {
 		t.Parallel()
 
 		attempts := 0
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			attempts++
 
 			w.Header().Set("Content-Type", "application/json")

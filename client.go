@@ -190,12 +190,12 @@ func (c *Client) Ping() error {
 	return fmt.Errorf("max attempts exceeded: %w", lastErr)
 }
 
-func (c *Client) sendMessage(url string, values url.Values) (*clientResponse, error) {
+func (c *Client) sendMessage(endpoint string, values url.Values) (*clientResponse, error) {
 	ctx := context.Background()
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(values.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(values.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

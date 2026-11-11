@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/docker/docker/daemon/logger"
-	"github.com/valyala/fasttemplate"
-	"go.uber.org/zap"
 	"io"
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/docker/docker/daemon/logger"
+	"github.com/valyala/fasttemplate"
+	"go.uber.org/zap"
 )
 
 const (
@@ -72,11 +73,11 @@ type TelegramLogger struct {
 	logger *zap.Logger
 }
 
-var _ = (logger.Logger)(&TelegramLogger{})
+var _ logger.Logger = (*TelegramLogger)(nil)
 
 // NewTelegramLogger creates a new TelegramLogger.
 func NewTelegramLogger(
-	logger *zap.Logger,
+	zapLogger *zap.Logger,
 	containerDetails *ContainerDetails,
 	opts ...TelegramLoggerOption,
 ) (*TelegramLogger, error) {
@@ -85,15 +86,15 @@ func NewTelegramLogger(
 		return nil, fmt.Errorf("failed to parse logger config: %w", err)
 	}
 
-	logger.Debug("parsed logger config", zap.Any("config", cfg))
-	logger.Debug("parsed container details", zap.Any("details", containerDetails))
+	zapLogger.Debug("parsed logger config", zap.Any("config", cfg))
+	zapLogger.Debug("parsed container details", zap.Any("details", containerDetails))
 
 	formatter, err := newMessageFormatter(containerDetails, cfg.Attrs, cfg.Template)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create message formatter: %w", err)
 	}
 
-	client, err := NewClient(logger, cfg.ClientConfig)
+	client, err := NewClient(zapLogger, cfg.ClientConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Telegram Client: %w", err)
 	}
@@ -112,7 +113,7 @@ func NewTelegramLogger(
 		buffer:             buffer,
 		partialLogsBuffer:  newPartialLogBuffer(),
 		closed:             make(chan struct{}),
-		logger:             logger,
+		logger:             zapLogger,
 	}
 
 	for _, opt := range opts {

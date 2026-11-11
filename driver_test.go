@@ -66,7 +66,9 @@ func (t *telegramLoggerMock) Close() error {
 }
 
 func produceLogs(t *testing.T, loggerMock *telegramLoggerMock, count int, fifoPath string) {
-	w, err := fifo.OpenFifo(context.Background(), fifoPath, unix.O_RDWR|unix.O_CREAT|unix.O_NONBLOCK, 0700)
+	t.Helper()
+
+	w, err := fifo.OpenFifo(context.Background(), fifoPath, unix.O_RDWR|unix.O_CREAT|unix.O_NONBLOCK, 0o700)
 	require.NoError(t, err)
 
 	encoder := logdriver.NewLogEntryEncoder(w)
@@ -89,6 +91,8 @@ func produceLogs(t *testing.T, loggerMock *telegramLoggerMock, count int, fifoPa
 }
 
 func setupDriver(t *testing.T) *Driver {
+	t.Helper()
+
 	driver := NewDriver(zap.NewNop())
 	tempDir := t.TempDir()
 	driver.fs = &fsMock{basePath: tempDir}
@@ -278,12 +282,16 @@ func TestDriverReadLogs(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("Success", func(t *testing.T) {
+		t.Parallel()
+
 		r, err := driver.ReadLogs(ctx, containerDetails.ContainerID, readConfig)
 		assert.NoError(t, err)
 		assert.NotNil(t, r)
 	})
 
 	t.Run("Not logging", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := driver.ReadLogs(ctx, "nonexistent-container", readConfig)
 		assert.Error(t, err)
 		assert.True(t, strings.Contains(err.Error(), "not logging"))
@@ -335,7 +343,7 @@ func createTempFifo(t *testing.T, tempDir string) string {
 
 	nano := time.Now().UnixNano()
 	fifoPath := filepath.Join(tempDir, strconv.FormatInt(nano, 10)+"fifo")
-	if err := syscall.Mkfifo(fifoPath, 0666); err != nil {
+	if err := syscall.Mkfifo(fifoPath, 0o666); err != nil {
 		t.Fatalf("failed to create fifo file: %v", err)
 	}
 

@@ -87,8 +87,6 @@ func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDeta
 		if err := stream.Close(); err != nil {
 			d.zapLogger.Error("failed to close stream", zap.Error(err))
 		}
-
-		stream = nil
 	}(stream)
 
 	noFile, err := parseBool(containerDetails.Config[cfgNoFileKey], false)
@@ -101,8 +99,8 @@ func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDeta
 	}
 
 	if !noFile {
-		folder := filepath.Join(d.fs.BasePath(), "/var/log/docker", containerDetails.ContainerID)
-		if err := d.fs.MkdirAll(folder, 0755); err != nil {
+		folder := filepath.Join(d.fs.BasePath(), "var", "log", "docker", containerDetails.ContainerID)
+		if err := d.fs.MkdirAll(folder, 0o755); err != nil {
 			return nil, fmt.Errorf("failed to create folder: %w", err)
 		}
 
@@ -117,7 +115,7 @@ func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDeta
 		return nil, fmt.Errorf("failed to create telegram logger: %w", err)
 	}
 
-	stream.logFifo, err = fifo.OpenFifo(context.Background(), streamPath, unix.O_RDWR|unix.O_CREAT|unix.O_NONBLOCK, 0700)
+	stream.logFifo, err = fifo.OpenFifo(context.Background(), streamPath, unix.O_RDWR|unix.O_CREAT|unix.O_NONBLOCK, 0o700)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open fifo: %w", err)
 	}
@@ -427,7 +425,7 @@ type osFS struct{}
 var _ fileSystem = (*osFS)(nil)
 
 func (osFS) BasePath() string {
-	return ""
+	return "/"
 }
 
 func (osFS) MkdirAll(path string, perm os.FileMode) error {

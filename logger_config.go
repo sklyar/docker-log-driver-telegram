@@ -2,10 +2,11 @@ package main
 
 import (
 	"fmt"
-	"github.com/docker/go-units"
 	"regexp"
 	"strconv"
 	"time"
+
+	"github.com/docker/go-units"
 )
 
 const (
