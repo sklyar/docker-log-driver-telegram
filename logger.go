@@ -292,8 +292,10 @@ func (l *TelegramLogger) runBatching() {
 			add(log)
 		}
 	}
-	defer drain()
+	// Deferred calls run in reverse order: on close, first add the lines
+	// left in the buffer, then send the last batch.
 	defer flush()
+	defer drain()
 
 	for {
 		select {

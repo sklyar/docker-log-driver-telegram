@@ -209,6 +209,35 @@ func TestTelegramLogger_Log_Buffer_BatchLimit(t *testing.T) {
 	require.NoError(t, l.Close())
 }
 
+func TestTelegramLogger_Close_SendsBufferedLines(t *testing.T) {
+	t.Parallel()
+
+	containerDetails := *defaultContainerDetails
+	containerDetails.Config = map[string]string{
+		cfgTokenKey:              "token",
+		cfgChatIDKey:             "chat_id",
+		cfgBatchEnabledKey:       "true",
+		cfgBatchFlushIntervalKey: "1m",
+	}
+
+	lines := []string{"line1", "line2", "line3", "line4", "line5"}
+
+	client := &recordingClient{}
+
+	l, err := NewTelegramLogger(zap.NewNop(), &containerDetails)
+	require.NoError(t, err)
+
+	l.client = client
+
+	// Close right after logging, so some lines are still in the buffer.
+	for _, line := range lines {
+		require.NoError(t, l.Log(&logger.Message{Line: []byte(line)}))
+	}
+	require.NoError(t, l.Close())
+
+	assert.Equal(t, strings.Join(lines, "\n"), strings.Join(client.messages(), "\n"))
+}
+
 func TestTelegramLogger_Log_Buffer_Overflow(t *testing.T) {
 	t.Parallel()
 
