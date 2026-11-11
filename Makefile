@@ -6,7 +6,7 @@ PLUGIN_TAG ?= $(shell git describe --match "v[0-9]*" --abbrev=0 --tags 2>/dev/nu
 define build-rootfs
 	$(V)rm -rf ./rootfs || true
 	$(V)mkdir rootfs || true
-	$(V)docker build -t rootfsimage -f Dockerfile.build .
+	$(V)docker build --build-arg VERSION=$(PLUGIN_TAG) -t rootfsimage -f Dockerfile.build .
 
 	ID=$$(docker create rootfsimage true) && \
 	(docker export $$ID | tar -x -C rootfs) && \
@@ -20,6 +20,8 @@ endef
 build:
 	$(V)CGO_ENABLED=0 go build $(GO_FLAGS) -o $@ ./$(@D)
 
+# The rootfs is built separately for each tag: "docker plugin create" fails
+# with "content ... already exists" for a rootfs that another plugin has.
 .PHONY: docker-driver
 docker-driver: docker-driver-clean
 	$(call print-target)
@@ -32,7 +34,7 @@ docker-driver: docker-driver-clean
 	$(V)docker plugin create $(PLUGIN_NAME):latest .
 	$(V)rm -rf ./rootfs
 
-	$(V)rm config.json #
+	$(V)rm config.json
 
 .PHONY: docker-driver-push
 docker-driver-push: docker-driver
