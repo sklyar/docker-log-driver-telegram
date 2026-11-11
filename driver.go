@@ -254,13 +254,17 @@ func (d *Driver) ReadLogs(ctx context.Context, containerID string, readConfig *R
 	return r, nil
 }
 
+// StopLogging stops the stream. A stream that the driver does not know is
+// already stopped: for example, Docker stops the streams of the previous
+// plugin process after the plugin restarts.
 func (d *Driver) StopLogging(streamPath string) error {
 	d.mu.Lock()
 
 	stream, exists := d.streams[streamPath]
 	if !exists {
 		d.mu.Unlock()
-		return errors.New("not logging")
+		d.zapLogger.Info("the stream is already stopped", zap.String("stream_path", streamPath))
+		return nil
 	}
 
 	delete(d.streams, streamPath)

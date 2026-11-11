@@ -296,6 +296,13 @@ func (l *TelegramLogger) flush(b *batch) {
 	b.len = 0
 	b.lines = 0
 
+	if l.ctx.Err() != nil {
+		// The close timeout expired. Drop the batch without trying to send
+		// it; run reports all dropped messages once before it exits.
+		l.dropped.Add(int64(lines))
+		return
+	}
+
 	l.reportDropped()
 
 	if err := l.client.SendMessage(l.ctx, text); err != nil {

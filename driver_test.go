@@ -357,8 +357,9 @@ func TestDriverStopLogging(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoDirExists(t, logFolder(driver, containerDetails.ContainerID))
 
+	// The second stop does nothing.
 	err = driver.StopLogging(fifoPath)
-	assert.ErrorContains(t, err, "not logging")
+	assert.NoError(t, err)
 }
 
 // countingLogger counts the messages. It is slow on purpose,

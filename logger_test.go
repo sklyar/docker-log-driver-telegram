@@ -420,6 +420,7 @@ func TestTelegramLogger_Close_Timeout(t *testing.T) {
 
 	assert.Less(t, time.Since(start), 3*time.Second)
 	assert.Equal(t, int64(3), droppedCount(observedLogs))
+	assert.Len(t, observedLogs.FilterMessage("dropped log messages").All(), 1, "the drops on close must be reported once")
 	assert.ErrorIs(t, l.Log(&logger.Message{Line: []byte("late")}), errLoggerClosed)
 }
 
