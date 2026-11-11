@@ -241,6 +241,9 @@ func (l *TelegramLogger) runBatching() {
 	ticker := time.NewTicker(l.cfg.BatchFlushInterval)
 	defer ticker.Stop()
 
+	// batchRuneCount includes the newline after each line in the batch.
+	// flush drops the last newline, so the sent message has
+	// batchRuneCount-1 characters.
 	var (
 		batch          bytes.Buffer
 		batchRuneCount int
@@ -266,12 +269,19 @@ func (l *TelegramLogger) runBatching() {
 	}
 
 	add := func(log string) {
-		logLength := utf8.RuneCountInString(log) + 1
+		logLength := utf8.RuneCountInString(log)
+
+		// With this line the message would have batchRuneCount+logLength
+		// characters. Send the current batch first if the line does not fit.
+		if batchRuneCount > 0 && batchRuneCount+logLength > l.maxLogMessageChars {
+			flush()
+		}
 
 		batch.WriteString(log)
 		batch.WriteByte('\n')
-		batchRuneCount += logLength
+		batchRuneCount += logLength + 1
 
+		// No other non-empty line fits into the batch, so send it now.
 		if batchRuneCount >= l.maxLogMessageChars {
 			flush()
 		}

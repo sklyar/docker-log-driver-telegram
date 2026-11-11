@@ -1,9 +1,12 @@
 package main
 
 import (
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/daemon/logger"
@@ -29,6 +32,27 @@ type mockClient struct {
 func (c *mockClient) SendMessage(message string) error {
 	args := c.Called(message)
 	return args.Error(0)
+}
+
+// recordingClient stores all sent messages.
+type recordingClient struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (c *recordingClient) SendMessage(message string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.msgs = append(c.msgs, message)
+	return nil
+}
+
+func (c *recordingClient) messages() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return slices.Clone(c.msgs)
 }
 
 func TestTelegramLogger_Log_NoBuffer(t *testing.T) {
@@ -138,6 +162,51 @@ func TestTelegramLogger_Log_Buffer_Drain(t *testing.T) {
 	require.NoError(t, err)
 
 	client.AssertExpectations(t)
+}
+
+func TestTelegramLogger_Log_Buffer_BatchLimit(t *testing.T) {
+	t.Parallel()
+
+	containerDetails := *defaultContainerDetails
+	containerDetails.Config = map[string]string{
+		cfgTokenKey:              "token",
+		cfgChatIDKey:             "chat_id",
+		cfgBatchEnabledKey:       "true",
+		cfgBatchFlushIntervalKey: "1s",
+	}
+
+	const maxChars = 10
+
+	// The lengths are chosen so that some batches are exactly maxChars long
+	// and some lines do not fit into the current batch.
+	lines := []string{"aaaa", "ббб", "cc", "ddddddd", "eeeeeeeeee", "f", "gggggggg", "hh"}
+
+	client := &recordingClient{}
+
+	l, err := NewTelegramLogger(zap.NewNop(), &containerDetails, WithMaxLogMessageChars(maxChars))
+	require.NoError(t, err)
+
+	l.client = client
+
+	for _, line := range lines {
+		require.NoError(t, l.Log(&logger.Message{Line: []byte(line)}))
+	}
+
+	sentLines := func() []string {
+		return strings.Split(strings.Join(client.messages(), "\n"), "\n")
+	}
+
+	// The last batch is sent by the flush ticker.
+	require.Eventually(t, func() bool {
+		return len(sentLines()) >= len(lines)
+	}, 3*time.Second, 10*time.Millisecond)
+
+	for _, msg := range client.messages() {
+		assert.LessOrEqual(t, utf8.RuneCountInString(msg), maxChars, "message %q is too long", msg)
+	}
+	assert.Equal(t, lines, sentLines())
+
+	require.NoError(t, l.Close())
 }
 
 func TestTelegramLogger_Log_Buffer_Overflow(t *testing.T) {
