@@ -5,8 +5,6 @@ import (
 	"regexp"
 	"strconv"
 	"time"
-
-	"github.com/docker/go-units"
 )
 
 const (
@@ -25,7 +23,7 @@ const (
 	cfgBatchEnabledKey       = "batch-enabled"
 	cfgBatchFlushIntervalKey = "batch-flush-interval"
 
-	cfgMaxBufferSizeKey = "max-buffer-size"
+	cfgBufferMessagesKey = "buffer-messages"
 )
 
 type loggerConfig struct {
@@ -36,7 +34,9 @@ type loggerConfig struct {
 	Template    string
 	FilterRegex *regexp.Regexp
 
-	MaxBufferSize int64
+	// BufferMessages is the number of messages that wait to be sent.
+	// When the buffer is full, the oldest message is dropped.
+	BufferMessages int
 
 	BatchEnabled       bool
 	BatchFlushInterval time.Duration
@@ -46,7 +46,7 @@ var defaultLoggerConfig = loggerConfig{
 	Template:           "{log}",
 	BatchEnabled:       true,
 	BatchFlushInterval: 3 * time.Second,
-	MaxBufferSize:      1e6, // 1MB
+	BufferMessages:     10_000,
 }
 
 var defaultClientConfig = ClientConfig{
@@ -80,10 +80,13 @@ func parseLoggerConfig(containerDetails *ContainerDetails) (*loggerConfig, error
 		}
 	}
 
-	if maxBufferSize, ok := containerDetails.Config[cfgMaxBufferSizeKey]; ok {
-		cfg.MaxBufferSize, err = units.RAMInBytes(maxBufferSize)
+	if bufferMessages, ok := containerDetails.Config[cfgBufferMessagesKey]; ok {
+		cfg.BufferMessages, err = strconv.Atoi(bufferMessages)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse %q option: %w", cfgMaxBufferSizeKey, err)
+			return nil, fmt.Errorf("failed to parse %q option: %w", cfgBufferMessagesKey, err)
+		}
+		if cfg.BufferMessages < 1 {
+			return nil, fmt.Errorf("invalid %q option: %d", cfgBufferMessagesKey, cfg.BufferMessages)
 		}
 	}
 
@@ -103,10 +106,6 @@ func parseLoggerConfig(containerDetails *ContainerDetails) (*loggerConfig, error
 			if cfg.BatchFlushInterval < 1*time.Second {
 				return nil, fmt.Errorf("invalid %q option: %s", cfgBatchFlushIntervalKey, cfg.BatchFlushInterval)
 			}
-		}
-
-		if cfg.MaxBufferSize == 0 {
-			return nil, fmt.Errorf("batching is enabled but %q option is not set", cfgMaxBufferSizeKey)
 		}
 	}
 
@@ -136,8 +135,10 @@ func validateDriverOptions(opts map[string]string) error {
 			cfgFilterRegexKey,
 			cfgBatchEnabledKey,
 			cfgBatchFlushIntervalKey,
-			cfgMaxBufferSizeKey:
-		case "max-file", "max-size", "compress", "labels", "labels-regex", "env", "env-regex", "tag", "mode":
+			cfgBufferMessagesKey:
+		case "max-file", "max-size", "compress", "labels", "labels-regex", "env", "env-regex", "tag":
+		// Docker uses these options itself for the non-blocking mode.
+		case "mode", "max-buffer-size":
 		case cfgNoFileKey, cfgKeepFileKey:
 		default:
 			return fmt.Errorf("unknown log opt '%s' for telegram log driver", opt)
@@ -176,6 +177,9 @@ func parseClientConfig(containerDetails *ContainerDetails) (ClientConfig, error)
 		clientConfig.Timeout, err = time.ParseDuration(timeout)
 		if err != nil {
 			return clientConfig, fmt.Errorf("failed to parse %q option: %w", cfgTimeoutKey, err)
+		}
+		if clientConfig.Timeout <= 0 {
+			return clientConfig, fmt.Errorf("invalid %q option: %s", cfgTimeoutKey, clientConfig.Timeout)
 		}
 	}
 

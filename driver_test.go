@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,18 +31,32 @@ func (m *fsMock) BasePath() string {
 	return m.basePath
 }
 
+// checkPath returns an error if path is not inside the base path,
+// so that tests find wrong paths instead of fixing them.
+func (m *fsMock) checkPath(path string) error {
+	if !strings.HasPrefix(path, m.basePath+string(filepath.Separator)) {
+		return fmt.Errorf("path %q is not inside %q", path, m.basePath)
+	}
+	return nil
+}
+
 func (m *fsMock) MkdirAll(path string, perm os.FileMode) error {
-	if !strings.HasPrefix(path, m.basePath) {
-		path = filepath.Join(m.basePath, path)
+	if err := m.checkPath(path); err != nil {
+		return err
 	}
 	return os.MkdirAll(path, perm)
 }
 
 func (m *fsMock) RemoveAll(path string) error {
-	if !strings.HasPrefix(path, m.basePath) {
-		path = filepath.Join(m.basePath, path)
+	if err := m.checkPath(path); err != nil {
+		return err
 	}
 	return os.RemoveAll(path)
+}
+
+// logFolder returns the folder of the json log file of the container.
+func logFolder(driver *Driver, containerID string) string {
+	return filepath.Join(driver.fs.BasePath(), "var", "log", "docker", containerID)
 }
 
 type telegramLoggerMock struct {
@@ -78,15 +93,18 @@ func produceLogs(t *testing.T, loggerMock *telegramLoggerMock, count int, fifoPa
 			TimeNano: time.Now().UnixNano(),
 			Line:     []byte(strconv.Itoa(i)),
 		}
-		err = encoder.Encode(entry)
-		require.NoError(t, err)
 
+		// Expect the message before it is written: the driver can read it
+		// from the fifo right away.
 		msg := &logger.Message{
 			Line:      entry.Line,
 			Source:    entry.Source,
 			Timestamp: time.Unix(0, entry.TimeNano),
 		}
 		loggerMock.On("Log", msg).Return(nil)
+
+		err = encoder.Encode(entry)
+		require.NoError(t, err)
 	}
 }
 
@@ -244,13 +262,12 @@ func TestDriverStartLogging_AlreadyLoggingForContainer(t *testing.T) {
 	_, err := driver.StartLogging(fifoPath, containerDetails)
 	assert.NoError(t, err)
 
-	loggerMock.On("Close").Return(nil)
-
 	fifoPath = createTempFifo(t, driver.fs.BasePath())
 	_, err = driver.StartLogging(fifoPath, containerDetails)
 	assert.ErrorContains(t, err, "already logging for container")
 
-	loggerMock.AssertExpectations(t)
+	// The failed start must not touch the log folder of the working stream.
+	assert.DirExists(t, logFolder(driver, containerDetails.ContainerID))
 }
 
 func TestDriverReadLogs(t *testing.T) {
@@ -331,11 +348,69 @@ func TestDriverStopLogging(t *testing.T) {
 		t.Fatal("timed out waiting for logs to be processed")
 	}
 
+	assert.DirExists(t, logFolder(driver, containerDetails.ContainerID))
+
 	err = driver.StopLogging(fifoPath)
 	assert.NoError(t, err)
+	assert.NoDirExists(t, logFolder(driver, containerDetails.ContainerID))
 
 	err = driver.StopLogging(fifoPath)
 	assert.ErrorContains(t, err, "not logging")
+}
+
+func TestDriverStopLogging_KeepFile(t *testing.T) {
+	t.Parallel()
+
+	loggerMock := &telegramLoggerMock{}
+	loggerMock.On("Close").Return(nil)
+
+	driver := setupDriver(t)
+	driver.processLogs = func(_ *logStream) {}
+	driver.newTelegramLogger = func(*zap.Logger, *ContainerDetails) (telegramLogger, error) {
+		return loggerMock, nil
+	}
+
+	fifoPath := createTempFifo(t, driver.fs.BasePath())
+	containerDetails := &ContainerDetails{
+		ContainerID: "testcontainer",
+		Config:      map[string]string{cfgKeepFileKey: "true"},
+	}
+
+	_, err := driver.StartLogging(fifoPath, containerDetails)
+	require.NoError(t, err)
+
+	require.NoError(t, driver.StopLogging(fifoPath))
+	assert.FileExists(t, filepath.Join(logFolder(driver, containerDetails.ContainerID), "json.log"))
+	loggerMock.AssertExpectations(t)
+}
+
+func TestDriverClose(t *testing.T) {
+	t.Parallel()
+
+	loggerMock := &telegramLoggerMock{}
+	loggerMock.On("Close").Return(nil)
+
+	driver := setupDriver(t)
+	driver.processLogs = func(_ *logStream) {}
+	driver.newTelegramLogger = func(*zap.Logger, *ContainerDetails) (telegramLogger, error) {
+		return loggerMock, nil
+	}
+
+	for _, id := range []string{"container1", "container2"} {
+		_, err := driver.StartLogging(createTempFifo(t, driver.fs.BasePath()), &ContainerDetails{
+			ContainerID: id,
+			Config:      map[string]string{},
+		})
+		require.NoError(t, err)
+	}
+
+	driver.Close()
+
+	loggerMock.AssertNumberOfCalls(t, "Close", 2)
+	assert.NoDirExists(t, logFolder(driver, "container1"))
+	assert.NoDirExists(t, logFolder(driver, "container2"))
+	assert.Empty(t, driver.streams)
+	assert.Empty(t, driver.containerStreams)
 }
 
 func createTempFifo(t *testing.T, tempDir string) string {

@@ -36,7 +36,7 @@ func TestParseLoggerConfig(t *testing.T) {
 				},
 				Attrs:              make(map[string]string),
 				Template:           defaultLoggerConfig.Template,
-				MaxBufferSize:      defaultLoggerConfig.MaxBufferSize,
+				BufferMessages:     defaultLoggerConfig.BufferMessages,
 				BatchEnabled:       defaultLoggerConfig.BatchEnabled,
 				BatchFlushInterval: defaultLoggerConfig.BatchFlushInterval,
 			},
@@ -61,7 +61,7 @@ func TestParseLoggerConfig(t *testing.T) {
 				},
 				Attrs:              make(map[string]string),
 				Template:           "{log}",
-				MaxBufferSize:      defaultLoggerConfig.MaxBufferSize,
+				BufferMessages:     defaultLoggerConfig.BufferMessages,
 				BatchEnabled:       defaultLoggerConfig.BatchEnabled,
 				BatchFlushInterval: 30 * time.Second,
 			},
@@ -85,19 +85,19 @@ func TestParseLoggerConfig(t *testing.T) {
 				},
 				Attrs:              make(map[string]string),
 				Template:           defaultLoggerConfig.Template,
-				MaxBufferSize:      defaultLoggerConfig.MaxBufferSize,
+				BufferMessages:     defaultLoggerConfig.BufferMessages,
 				FilterRegex:        regexp.MustCompile(`"ERROR"`),
 				BatchEnabled:       defaultLoggerConfig.BatchEnabled,
 				BatchFlushInterval: defaultLoggerConfig.BatchFlushInterval,
 			},
 		},
 		{
-			name: "custom max buffer size",
+			name: "custom buffer messages",
 			containerDetails: ContainerDetails{
 				Config: map[string]string{
-					cfgTokenKey:         "token",
-					cfgChatIDKey:        "chat_id",
-					cfgMaxBufferSizeKey: "100MB",
+					cfgTokenKey:          "token",
+					cfgChatIDKey:         "chat_id",
+					cfgBufferMessagesKey: "100",
 				},
 			},
 			want: loggerConfig{
@@ -110,7 +110,32 @@ func TestParseLoggerConfig(t *testing.T) {
 				},
 				Attrs:              make(map[string]string),
 				Template:           defaultLoggerConfig.Template,
-				MaxBufferSize:      100 * 1024 * 1024, // 100MB
+				BufferMessages:     100,
+				BatchEnabled:       defaultLoggerConfig.BatchEnabled,
+				BatchFlushInterval: defaultLoggerConfig.BatchFlushInterval,
+			},
+		},
+		{
+			name: "docker non-blocking mode options are accepted",
+			containerDetails: ContainerDetails{
+				Config: map[string]string{
+					cfgTokenKey:       "token",
+					cfgChatIDKey:      "chat_id",
+					"mode":            "non-blocking",
+					"max-buffer-size": "4m",
+				},
+			},
+			want: loggerConfig{
+				ClientConfig: ClientConfig{
+					APIURL:  defaultClientConfig.APIURL,
+					Token:   "token",
+					ChatID:  "chat_id",
+					Retries: defaultClientConfig.Retries,
+					Timeout: defaultClientConfig.Timeout,
+				},
+				Attrs:              make(map[string]string),
+				Template:           defaultLoggerConfig.Template,
+				BufferMessages:     defaultLoggerConfig.BufferMessages,
 				BatchEnabled:       defaultLoggerConfig.BatchEnabled,
 				BatchFlushInterval: defaultLoggerConfig.BatchFlushInterval,
 			},
@@ -160,15 +185,48 @@ func TestParseLoggerConfig(t *testing.T) {
 			wantErr: "failed to parse \"batch-flush-interval\"",
 		},
 		{
-			name: "invalid \"max-buffer-size\"",
+			name: "failed to parse \"buffer-messages\"",
 			containerDetails: ContainerDetails{
 				Config: map[string]string{
-					cfgTokenKey:         "token",
-					cfgChatIDKey:        "chat_id",
-					cfgMaxBufferSizeKey: "-1",
+					cfgTokenKey:          "token",
+					cfgChatIDKey:         "chat_id",
+					cfgBufferMessagesKey: "1MB",
 				},
 			},
-			wantErr: "failed to parse \"max-buffer-size\" option",
+			wantErr: "failed to parse \"buffer-messages\" option",
+		},
+		{
+			name: "invalid \"buffer-messages\"",
+			containerDetails: ContainerDetails{
+				Config: map[string]string{
+					cfgTokenKey:          "token",
+					cfgChatIDKey:         "chat_id",
+					cfgBufferMessagesKey: "0",
+				},
+			},
+			wantErr: "invalid \"buffer-messages\" option",
+		},
+		{
+			name: "invalid \"url\"",
+			containerDetails: ContainerDetails{
+				Config: map[string]string{
+					cfgTokenKey:  "token",
+					cfgChatIDKey: "chat_id",
+					cfgURLKey:    "api.telegram.org",
+				},
+			},
+			wantErr: "the scheme must be http or https",
+		},
+		{
+			name: "unknown option",
+			containerDetails: ContainerDetails{
+				Config: map[string]string{
+					cfgTokenKey:  "token",
+					cfgChatIDKey: "chat_id",
+					"unknown":    "value",
+				},
+			},
+			wantErr: "unknown log opt 'unknown'",
 		},
 	}
 
@@ -283,6 +341,15 @@ func TestParseClientConfig(t *testing.T) {
 				cfgTimeoutKey: "invalid",
 			},
 			wantErr: "failed to parse \"timeout\" option",
+		},
+		{
+			name: "zero timeout",
+			config: map[string]string{
+				cfgTokenKey:   "token",
+				cfgChatIDKey:  "chat_id",
+				cfgTimeoutKey: "0s",
+			},
+			wantErr: "invalid \"timeout\" option",
 		},
 	}
 

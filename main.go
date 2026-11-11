@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/docker/docker/daemon/logger"
@@ -15,6 +18,10 @@ import (
 )
 
 const pluginManifest = `{"Implements": ["LoggingDriver"]}`
+
+// shutdownTimeout limits how long the plugin sends buffered messages when
+// it stops. Docker kills the plugin 10 seconds after SIGTERM.
+const shutdownTimeout = 8 * time.Second
 
 // ContainerDetails is an alias for logger.Info.
 type ContainerDetails = logger.Info
@@ -26,16 +33,24 @@ type ReadConfig = logger.ReadConfig
 var version = ""
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	env := os.Getenv("ENV")
 	logLevel := os.Getenv("LOG_LEVEL")
 	zapLogger, err := newLogger(env, logLevel)
 	if err != nil {
-		panic(err)
+		fmt.Fprintln(os.Stderr, err)
+		return 1
 	}
 	zapLogger = zapLogger.With(
 		zap.String("version", version),
 		zap.String("environment", env),
 	)
+	defer func() {
+		_ = zapLogger.Sync()
+	}()
 
 	driver := NewDriver(zapLogger)
 
@@ -46,8 +61,44 @@ func main() {
 		go servePprof(zapLogger, pprofPort)
 	}
 
-	if err := srv.Serve(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- srv.Serve()
+	}()
+
+	exitCode := 0
+	select {
+	case err := <-serveErr:
 		zapLogger.Error("failed to start Server", zap.Error(err))
+		exitCode = 1
+	case <-ctx.Done():
+		zapLogger.Info("shutting down")
+	}
+
+	shutdown(zapLogger, driver)
+
+	return exitCode
+}
+
+// shutdown stops all log streams, so that they send the buffered messages.
+// It waits for at most shutdownTimeout.
+func shutdown(zapLogger *zap.Logger, driver *Driver) {
+	done := make(chan struct{})
+	go func() {
+		driver.Close()
+		close(done)
+	}()
+
+	timer := time.NewTimer(shutdownTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+	case <-timer.C:
+		zapLogger.Warn("timeout while stopping log streams, some messages are lost")
 	}
 }
 

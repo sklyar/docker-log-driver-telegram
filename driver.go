@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -41,12 +43,15 @@ type Driver struct {
 }
 
 func NewDriver(zapLogger *zap.Logger) *Driver {
+	// Containers that send logs to the same chat share one rate limiter.
+	limiters := newChatLimiters()
+
 	driver := &Driver{
 		streams:          make(map[string]*logStream),
 		containerStreams: make(map[string]*logStream),
 		fs:               osFS{},
 		newTelegramLogger: func(logger *zap.Logger, details *ContainerDetails) (telegramLogger, error) {
-			l, err := NewTelegramLogger(logger, details)
+			l, err := NewTelegramLogger(logger, details, WithChatLimiters(limiters))
 			if err != nil {
 				return nil, err
 			}
@@ -62,16 +67,37 @@ func NewDriver(zapLogger *zap.Logger) *Driver {
 	return driver
 }
 
-func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDetails) (stream *logStream, err error) {
-	d.mu.RLock()
-	if _, ok := d.streams[streamPath]; ok {
-		d.mu.RUnlock()
+func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDetails) (*logStream, error) {
+	// Hold the lock for the whole start. Otherwise two starts for the same
+	// container could use the same log folder, and the start that fails
+	// would remove the folder of the other one.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if _, exists := d.streams[streamPath]; exists {
 		return nil, errors.New("already logging")
 	}
-	d.mu.RUnlock()
+	if _, exists := d.containerStreams[containerDetails.ContainerID]; exists {
+		return nil, errors.New("already logging for container")
+	}
 
+	stream, err := d.newStream(streamPath, containerDetails)
+	if err != nil {
+		return nil, err
+	}
+
+	d.streams[streamPath] = stream
+	d.containerStreams[containerDetails.ContainerID] = stream
+
+	go d.processLogs(stream)
+
+	return stream, nil
+}
+
+// newStream creates the loggers and opens the fifo for a new stream.
+func (d *Driver) newStream(streamPath string, containerDetails *ContainerDetails) (_ *logStream, err error) {
 	name := "container:" + containerDetails.ContainerName
-	stream = &logStream{
+	stream := &logStream{
 		streamPath:       streamPath,
 		containerDetails: containerDetails,
 		logger:           d.zapLogger.Named(name),
@@ -79,15 +105,14 @@ func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDeta
 		stop:             make(chan struct{}),
 	}
 
-	defer func(stream *logStream) {
-		if err == nil || stream == nil {
+	defer func() {
+		if err == nil {
 			return
 		}
-
-		if err := stream.Close(); err != nil {
-			d.zapLogger.Error("failed to close stream", zap.Error(err))
+		if closeErr := stream.Close(); closeErr != nil {
+			d.zapLogger.Error("failed to close stream", zap.Error(closeErr))
 		}
-	}(stream)
+	}()
 
 	noFile, err := parseBool(containerDetails.Config[cfgNoFileKey], false)
 	if err != nil {
@@ -103,6 +128,7 @@ func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDeta
 		if err := d.fs.MkdirAll(folder, 0o755); err != nil {
 			return nil, fmt.Errorf("failed to create folder: %w", err)
 		}
+		stream.folder = folder
 
 		stream.jsonLogger, err = newJSONLogger(containerDetails, folder)
 		if err != nil {
@@ -119,21 +145,6 @@ func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDeta
 	if err != nil {
 		return nil, fmt.Errorf("failed to open fifo: %w", err)
 	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if _, exists := d.streams[streamPath]; exists {
-		return nil, errors.New("already logging")
-	}
-	if _, exists := d.containerStreams[containerDetails.ContainerID]; exists {
-		return nil, errors.New("already logging for container")
-	}
-
-	d.streams[streamPath] = stream
-	d.containerStreams[containerDetails.ContainerID] = stream
-
-	go d.processLogs(stream)
 
 	return stream, nil
 }
@@ -173,13 +184,6 @@ func (d *Driver) defaultProcessLogs(stream *logStream, processedNotifier chan<- 
 			Timestamp:    time.Unix(0, entry.GetTimeNano()),
 			PLogMetaData: partialLog,
 		}
-
-		stream.logger.Debug(
-			"message",
-			zap.String("line", string(log.Line)),
-			zap.String("source", log.Source),
-			zap.Time("timestamp", log.Timestamp),
-		)
 
 		if err := stream.telegramLogger.Log(log); err != nil {
 			stream.logger.Error("failed to log to telegram logger", zap.Error(err))
@@ -255,6 +259,25 @@ func (d *Driver) StopLogging(streamPath string) error {
 	return nil
 }
 
+// Close stops all streams. The plugin calls it when it shuts down.
+func (d *Driver) Close() {
+	d.mu.Lock()
+	streams := slices.Collect(maps.Values(d.streams))
+	clear(d.streams)
+	clear(d.containerStreams)
+	d.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, stream := range streams {
+		wg.Go(func() {
+			if err := stream.Close(); err != nil {
+				d.zapLogger.Error("failed to close stream", zap.Error(err))
+			}
+		})
+	}
+	wg.Wait()
+}
+
 // logReader is a wrapper around json-file logger that reads logs
 // from it and writes them to the pipe.
 type logReader struct {
@@ -288,7 +311,7 @@ func (r *logReader) ReadLogs(ctx context.Context) {
 			}
 
 			buf.Line = msg.Line
-			buf.Partial = msg.PLogMetaData != nil && msg.PLogMetaData.Last
+			buf.Partial = msg.PLogMetaData != nil // The same as Docker sets it.
 			buf.Source = msg.Source
 			buf.TimeNano = msg.Timestamp.UnixNano()
 
@@ -318,6 +341,8 @@ type logStream struct {
 	telegramLogger telegramLogger
 	jsonLogger     logger.Logger
 
+	// folder is the folder that the plugin created for the json log file.
+	folder   string
 	keepFile bool
 
 	logger *zap.Logger
@@ -342,12 +367,14 @@ func (s *logStream) Close() error {
 			}
 		}
 
-		if s.jsonLogger != nil && !s.keepFile {
+		if s.jsonLogger != nil {
 			if err := s.jsonLogger.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("failed to close json logger: %w", err))
 			}
-			folder := filepath.Dir(s.containerDetails.LogPath)
-			if err := s.fs.RemoveAll(folder); err != nil {
+		}
+
+		if s.folder != "" && !s.keepFile {
+			if err := s.fs.RemoveAll(s.folder); err != nil {
 				errs = append(errs, fmt.Errorf("failed to remove log dir: %w", err))
 			}
 		}
