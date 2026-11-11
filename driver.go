@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/containerd/fifo"
@@ -20,6 +21,20 @@ import (
 	"github.com/docker/docker/daemon/logger/jsonfilelog"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
+)
+
+const (
+	// drainTimeout limits how long Close waits until the driver reads
+	// the logs that Docker has already written to the fifo.
+	drainTimeout = 5 * time.Second
+
+	// drainPollInterval is how often Close checks if the fifo is empty.
+	drainPollInterval = 10 * time.Millisecond
+
+	// processLogsTimeout limits how long Close waits for processLogs to
+	// stop after the fifo is closed. On Linux, closing the fifo stops
+	// a blocked read at once.
+	processLogsTimeout = time.Second
 )
 
 type telegramLogger interface {
@@ -89,7 +104,11 @@ func (d *Driver) StartLogging(streamPath string, containerDetails *ContainerDeta
 	d.streams[streamPath] = stream
 	d.containerStreams[containerDetails.ContainerID] = stream
 
-	go d.processLogs(stream)
+	stream.done = make(chan struct{})
+	go func() {
+		defer close(stream.done)
+		d.processLogs(stream)
+	}()
 
 	return stream, nil
 }
@@ -152,21 +171,12 @@ func (d *Driver) newStream(streamPath string, containerDetails *ContainerDetails
 // defaultProcessLogs reads logs from fifo file and forwards them to the loggers.
 // The optional 'processedNotifier' channel is used exclusively for testing purposes to signal
 // when a log entry has been processed. It can be left as 'nil' for non-testing use cases.
+//
+// It runs until the fifo is closed. It passes every entry that it has read
+// to the loggers: logStream.Close closes the loggers only after it stops.
 func (d *Driver) defaultProcessLogs(stream *logStream, processedNotifier chan<- struct{}) {
-	defer func() {
-		if err := stream.Close(); err != nil {
-			d.zapLogger.Error("failed to close stream", zap.Error(err))
-		}
-	}()
-
 	logs := NewLogs(stream)
 	for logs.Next() {
-		select {
-		case <-stream.stop:
-			return
-		default:
-		}
-
 		entry := logs.Log()
 
 		var partialLog *backend.PartialLogMetaData
@@ -204,6 +214,12 @@ func (d *Driver) defaultProcessLogs(stream *logStream, processedNotifier chan<- 
 
 	if err := logs.Err(); err != nil {
 		stream.logger.Error("failed to read logs", zap.Error(err))
+
+		// Nobody reads the fifo any more. Close it, so that Docker gets
+		// an error instead of being blocked on writing to a full fifo.
+		if err := stream.closeFifo(); err != nil {
+			stream.logger.Error("failed to close fifo", zap.Error(err))
+		}
 	}
 }
 
@@ -348,24 +364,38 @@ type logStream struct {
 	logger *zap.Logger
 	fs     fileSystem
 
-	stop       chan struct{}
-	closedOnce sync.Once
+	// stop is closed when the stream closes. It stops the log readers.
+	stop chan struct{}
+
+	// done is closed when processLogs exits. It is nil if processLogs
+	// was not started.
+	done chan struct{}
+
+	fifoCloseOnce sync.Once
+	closedOnce    sync.Once
 }
 
 // Close closes the stream.
+//
+// Docker calls StopLogging right after it writes the last logs to the fifo,
+// so the fifo can still have logs that the driver has not read. Close waits
+// until the driver reads them and passes them to the loggers, and only then
+// closes the loggers.
 func (s *logStream) Close() error {
 	var err error
 
 	s.closedOnce.Do(func() {
+		s.waitFifoDrained()
+
 		close(s.stop)
 
 		var errs []error
 
-		if s.logFifo != nil {
-			if err := s.logFifo.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("failed to close stream: %w", err))
-			}
+		if err := s.closeFifo(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close stream: %w", err))
 		}
+
+		s.waitProcessLogs()
 
 		if s.jsonLogger != nil {
 			if err := s.jsonLogger.Close(); err != nil {
@@ -391,10 +421,80 @@ func (s *logStream) Close() error {
 	return err
 }
 
+func (s *logStream) closeFifo() error {
+	var err error
+	s.fifoCloseOnce.Do(func() {
+		if s.logFifo != nil {
+			err = s.logFifo.Close()
+		}
+	})
+	return err
+}
+
+// waitFifoDrained waits until processLogs reads all data from the fifo.
+// It stops waiting when processLogs exits or drainTimeout expires.
+func (s *logStream) waitFifoDrained() {
+	if s.done == nil {
+		return
+	}
+
+	conn, ok := s.logFifo.(syscall.Conn)
+	if !ok {
+		return
+	}
+	rawConn, err := conn.SyscallConn()
+	if err != nil {
+		return
+	}
+
+	timeout := time.NewTimer(drainTimeout)
+	defer timeout.Stop()
+
+	ticker := time.NewTicker(drainPollInterval)
+	defer ticker.Stop()
+
+	for hasDataToRead(rawConn) {
+		select {
+		case <-s.done:
+			return
+		case <-timeout.C:
+			s.logger.Warn("timeout while reading the rest of the logs from the fifo")
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// hasDataToRead reports whether the file has data to read.
+func hasDataToRead(rawConn syscall.RawConn) bool {
+	var ready bool
+	err := rawConn.Control(func(fd uintptr) {
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}} //nolint:gosec // File descriptors fit into int32.
+		n, err := unix.Poll(fds, 0)
+		ready = err == nil && n > 0 && fds[0].Revents&unix.POLLIN != 0
+	})
+	return err == nil && ready
+}
+
+// waitProcessLogs waits until processLogs exits after the fifo is closed.
+func (s *logStream) waitProcessLogs() {
+	if s.done == nil {
+		return
+	}
+
+	timer := time.NewTimer(processLogsTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-s.done:
+	case <-timer.C:
+		s.logger.Warn("timeout while waiting for the log reader to stop")
+	}
+}
+
 // Logs represents an iterator for reading logs using logdriver.LogEntryDecoder.
 type Logs struct {
 	decoder logdriver.LogEntryDecoder
-	stream  *logStream
 
 	current logdriver.LogEntry
 
@@ -406,7 +506,6 @@ type Logs struct {
 func NewLogs(stream *logStream) *Logs {
 	return &Logs{
 		decoder: logdriver.NewLogEntryDecoder(stream.logFifo),
-		stream:  stream,
 	}
 }
 
@@ -439,12 +538,6 @@ func (l *Logs) Log() logdriver.LogEntry {
 // Err returns the last error encountered by the iterator.
 func (l *Logs) Err() error {
 	return l.lastErr
-}
-
-// Close closes the Logs iterator and the underlying log stream.
-func (l *Logs) Close() error {
-	l.closed = true
-	return l.stream.Close()
 }
 
 type osFS struct{}

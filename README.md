@@ -129,7 +129,8 @@ Docker keeps up to `max-buffer-size` of logs in its own buffer before it passes 
   up to 30s), and rate limit errors after the delay that Telegram returns.
 - When the buffer is full, the driver drops the oldest messages and writes the number of dropped messages to the
   plugin log.
-- When a container stops, the driver sends the buffered messages for at most 15 seconds and drops the rest.
+- When a container stops, the driver first reads the logs that Docker has already passed to it (for at most 5
+  seconds), then sends the buffered messages for at most 15 seconds and drops the rest.
 
 ### Template Tags
 

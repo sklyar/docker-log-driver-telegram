@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -342,10 +343,12 @@ func TestDriverStopLogging(t *testing.T) {
 	produceLogs(t, loggerMock, 2, fifoPath)
 	loggerMock.On("Close").Return(nil)
 
-	select {
-	case <-processedNotifier:
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for logs to be processed")
+	for range 2 {
+		select {
+		case <-processedNotifier:
+		case <-time.After(1 * time.Second):
+			t.Fatal("timed out waiting for logs to be processed")
+		}
 	}
 
 	assert.DirExists(t, logFolder(driver, containerDetails.ContainerID))
@@ -356,6 +359,60 @@ func TestDriverStopLogging(t *testing.T) {
 
 	err = driver.StopLogging(fifoPath)
 	assert.ErrorContains(t, err, "not logging")
+}
+
+// countingLogger counts the messages. It is slow on purpose,
+// so that the messages wait in the fifo.
+type countingLogger struct {
+	count atomic.Int64
+	delay time.Duration
+}
+
+func (l *countingLogger) Name() string { return "counting" }
+func (l *countingLogger) Close() error { return nil }
+
+func (l *countingLogger) Log(*logger.Message) error {
+	time.Sleep(l.delay)
+	l.count.Add(1)
+	return nil
+}
+
+func TestDriverStopLogging_ReadsTheRestOfFifo(t *testing.T) {
+	t.Parallel()
+
+	telegram := &countingLogger{delay: 50 * time.Microsecond}
+
+	driver := setupDriver(t)
+	driver.newTelegramLogger = func(*zap.Logger, *ContainerDetails) (telegramLogger, error) {
+		return telegram, nil
+	}
+
+	fifoPath := createTempFifo(t, driver.fs.BasePath())
+	_, err := driver.StartLogging(fifoPath, &ContainerDetails{
+		ContainerID: "testcontainer",
+		Config:      map[string]string{cfgNoFileKey: "true"},
+	})
+	require.NoError(t, err)
+
+	w, err := fifo.OpenFifo(context.Background(), fifoPath, unix.O_WRONLY|unix.O_NONBLOCK, 0)
+	require.NoError(t, err)
+	defer func() {
+		_ = w.Close()
+	}()
+
+	// Docker writes the last logs and calls StopLogging right after that.
+	const count = 300
+	encoder := logdriver.NewLogEntryEncoder(w)
+	for i := range count {
+		require.NoError(t, encoder.Encode(&logdriver.LogEntry{
+			Source:   "stdout",
+			TimeNano: time.Now().UnixNano(),
+			Line:     []byte(strconv.Itoa(i)),
+		}))
+	}
+
+	require.NoError(t, driver.StopLogging(fifoPath))
+	assert.Equal(t, int64(count), telegram.count.Load())
 }
 
 func TestDriverStopLogging_KeepFile(t *testing.T) {
